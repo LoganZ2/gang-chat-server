@@ -26,14 +26,19 @@ type ChangePasswordRequest struct {
 }
 
 type UpdateAccountRequest struct {
-	Username *string `json:"username"`
-	Email    *string `json:"email"`
+	Username          *string `json:"username"`
+	Email             *string `json:"email"`
+	EmailPublic       *bool   `json:"email_public"`
+	PhoneNumber       *string `json:"phone_number"`
+	PhoneNumberPublic *bool   `json:"phone_number_public"`
 }
 
 type UpdateProfileRequest struct {
-	DisplayName   *string `json:"display_name"`
-	Bio           *string `json:"bio"`
-	AvatarAssetID *string `json:"avatar_asset_id"`
+	DisplayName      *string `json:"display_name"`
+	Bio              *string `json:"bio"`
+	Gender           *string `json:"gender"`
+	AvatarAssetID    *string `json:"avatar_asset_id"`
+	DefaultAvatarKey *string `json:"default_avatar_key"`
 }
 
 type UpdateAudioSettingsRequest struct {
@@ -59,8 +64,12 @@ type UserResponse struct {
 	Username            string  `json:"username"`
 	DisplayName         string  `json:"display_name"`
 	Bio                 string  `json:"bio"`
+	Gender              string  `json:"gender"`
 	Email               string  `json:"email,omitempty"`
 	EmailVerified       *bool   `json:"email_verified,omitempty"`
+	EmailPublic         bool    `json:"email_public"`
+	PhoneNumber         string  `json:"phone_number,omitempty"`
+	PhoneNumberPublic   bool    `json:"phone_number_public"`
 	AvatarURL           *string `json:"avatar_url"`
 	DefaultAvatarKey    string  `json:"default_avatar_key"`
 	IsSuperuser         bool    `json:"is_superuser,omitempty"`
@@ -78,9 +87,11 @@ type SessionResponse struct {
 	ID         string  `json:"id"`
 	UserAgent  *string `json:"user_agent"`
 	IPAddress  *string `json:"ip_address"`
+	Location   string  `json:"location"`
 	CreatedAt  int64   `json:"created_at"`
 	LastUsedAt int64   `json:"last_used_at"`
 	ExpiresAt  int64   `json:"expires_at"`
+	RevokedAt  *int64  `json:"revoked_at,omitempty"`
 	IsCurrent  bool    `json:"is_current"`
 }
 

@@ -17,7 +17,8 @@ func (h *Handler) updateAccount(c *gin.Context) {
 		errorJSON(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	if req.Username == nil && req.Email == nil {
+	if req.Username == nil && req.Email == nil && req.EmailPublic == nil &&
+		req.PhoneNumber == nil && req.PhoneNumberPublic == nil {
 		errorJSON(c, http.StatusBadRequest, "validation_failed", "at least one account field is required")
 		return
 	}
@@ -57,11 +58,36 @@ func (h *Handler) updateAccount(c *gin.Context) {
 		args = append(args, email, strings.ToLower(email))
 	}
 
+	if req.EmailPublic != nil {
+		sets = append(sets, "email_public = ?")
+		args = append(args, *req.EmailPublic)
+	}
+
+	if req.PhoneNumber != nil {
+		phone := strings.TrimSpace(*req.PhoneNumber)
+		if phone == "" {
+			sets = append(sets, "phone_number = NULL", "phone_number_normalized = NULL")
+		} else {
+			normalized, ok := normalizePhoneNumber(phone)
+			if !ok {
+				errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid phone number")
+				return
+			}
+			sets = append(sets, "phone_number = ?", "phone_number_normalized = ?")
+			args = append(args, phone, normalized)
+		}
+	}
+
+	if req.PhoneNumberPublic != nil {
+		sets = append(sets, "phone_number_public = ?")
+		args = append(args, *req.PhoneNumberPublic)
+	}
+
 	args = append(args, user.ID)
 	_, err := h.DB.Exec(`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			errorJSON(c, http.StatusConflict, "conflict", "username or email already taken")
+			errorJSON(c, http.StatusConflict, "conflict", "username, email or phone number already taken")
 			return
 		}
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "account update failed")
@@ -81,7 +107,8 @@ func (h *Handler) updateProfile(c *gin.Context) {
 		errorJSON(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	if req.DisplayName == nil && req.Bio == nil && req.AvatarAssetID == nil {
+	if req.DisplayName == nil && req.Bio == nil && req.Gender == nil &&
+		req.AvatarAssetID == nil && req.DefaultAvatarKey == nil {
 		errorJSON(c, http.StatusBadRequest, "validation_failed", "at least one profile field is required")
 		return
 	}
@@ -111,6 +138,15 @@ func (h *Handler) updateProfile(c *gin.Context) {
 		sets = append(sets, "bio = ?")
 		args = append(args, bio)
 	}
+	if req.Gender != nil {
+		gender := strings.TrimSpace(*req.Gender)
+		if gender != "male" && gender != "female" && gender != "secret" {
+			errorJSON(c, http.StatusBadRequest, "validation_failed", "gender must be male, female or secret")
+			return
+		}
+		sets = append(sets, "gender = ?")
+		args = append(args, gender)
+	}
 	if req.AvatarAssetID != nil {
 		var url sql.NullString
 		if *req.AvatarAssetID != "" {
@@ -122,6 +158,15 @@ func (h *Handler) updateProfile(c *gin.Context) {
 		} else {
 			args = append(args, nil)
 		}
+	}
+	if req.DefaultAvatarKey != nil {
+		key := strings.TrimSpace(*req.DefaultAvatarKey)
+		if !isValidAvatarKey(key) {
+			errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid default avatar key")
+			return
+		}
+		sets = append(sets, "default_avatar_key = ?")
+		args = append(args, key)
 	}
 	args = append(args, user.ID)
 	if _, err := h.DB.Exec(`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...); err != nil {
@@ -199,23 +244,25 @@ func (h *Handler) deleteAccount(c *gin.Context) {
 		errorJSON(c, http.StatusForbidden, "forbidden", "super user account cannot be deleted")
 		return
 	}
-	now := time.Now().Unix()
-	if _, err := h.DB.Exec(`UPDATE users SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE id = ?`, now, now, user.ID); err != nil {
+	if _, err := h.DB.Exec(`DELETE FROM users WHERE id = ?`, user.ID); err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")
 		return
 	}
-	_ = model.RevokeAllOtherSessions(h.DB, user.ID, "")
-	_ = model.RevokeSession(h.DB, getSessionID(c))
 	c.JSON(http.StatusOK, MessageResponse{OK: true})
 }
 
 type forceUserSettingsRequest struct {
-	Username      *string `json:"username"`
-	Email         *string `json:"email"`
-	DisplayName   *string `json:"display_name"`
-	Bio           *string `json:"bio"`
-	AvatarAssetID *string `json:"avatar_asset_id"`
-	Status        *string `json:"status"`
+	Username          *string `json:"username"`
+	Email             *string `json:"email"`
+	EmailPublic       *bool   `json:"email_public"`
+	PhoneNumber       *string `json:"phone_number"`
+	PhoneNumberPublic *bool   `json:"phone_number_public"`
+	DisplayName       *string `json:"display_name"`
+	Bio               *string `json:"bio"`
+	Gender            *string `json:"gender"`
+	AvatarAssetID     *string `json:"avatar_asset_id"`
+	DefaultAvatarKey  *string `json:"default_avatar_key"`
+	Status            *string `json:"status"`
 }
 
 func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
@@ -228,7 +275,10 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		errorJSON(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	if req.Username == nil && req.Email == nil && req.DisplayName == nil && req.Bio == nil && req.AvatarAssetID == nil && req.Status == nil {
+	if req.Username == nil && req.Email == nil && req.EmailPublic == nil &&
+		req.PhoneNumber == nil && req.PhoneNumberPublic == nil &&
+		req.DisplayName == nil && req.Bio == nil && req.Gender == nil &&
+		req.AvatarAssetID == nil && req.DefaultAvatarKey == nil && req.Status == nil {
 		errorJSON(c, http.StatusBadRequest, "validation_failed", "at least one user setting is required")
 		return
 	}
@@ -253,6 +303,28 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		sets = append(sets, "email = ?", "email_normalized = ?", "email_verified = 0")
 		args = append(args, email, strings.ToLower(email))
 	}
+	if req.EmailPublic != nil {
+		sets = append(sets, "email_public = ?")
+		args = append(args, *req.EmailPublic)
+	}
+	if req.PhoneNumber != nil {
+		phone := strings.TrimSpace(*req.PhoneNumber)
+		if phone == "" {
+			sets = append(sets, "phone_number = NULL", "phone_number_normalized = NULL")
+		} else {
+			normalized, ok := normalizePhoneNumber(phone)
+			if !ok {
+				errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid phone number")
+				return
+			}
+			sets = append(sets, "phone_number = ?", "phone_number_normalized = ?")
+			args = append(args, phone, normalized)
+		}
+	}
+	if req.PhoneNumberPublic != nil {
+		sets = append(sets, "phone_number_public = ?")
+		args = append(args, *req.PhoneNumberPublic)
+	}
 	if req.DisplayName != nil {
 		displayName := strings.TrimSpace(*req.DisplayName)
 		if displayName == "" || utf8.RuneCountInString(displayName) > 32 {
@@ -271,6 +343,15 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		sets = append(sets, "bio = ?")
 		args = append(args, bio)
 	}
+	if req.Gender != nil {
+		gender := strings.TrimSpace(*req.Gender)
+		if gender != "male" && gender != "female" && gender != "secret" {
+			errorJSON(c, http.StatusBadRequest, "validation_failed", "gender must be male, female or secret")
+			return
+		}
+		sets = append(sets, "gender = ?")
+		args = append(args, gender)
+	}
 	if req.AvatarAssetID != nil {
 		var url sql.NullString
 		if *req.AvatarAssetID != "" {
@@ -282,6 +363,15 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		} else {
 			args = append(args, nil)
 		}
+	}
+	if req.DefaultAvatarKey != nil {
+		key := strings.TrimSpace(*req.DefaultAvatarKey)
+		if !isValidAvatarKey(key) {
+			errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid default avatar key")
+			return
+		}
+		sets = append(sets, "default_avatar_key = ?")
+		args = append(args, key)
 	}
 	if req.Status != nil {
 		status := strings.TrimSpace(*req.Status)
@@ -309,7 +399,7 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 	res, err := h.DB.Exec(`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			errorJSON(c, http.StatusConflict, "conflict", "username or email already taken")
+			errorJSON(c, http.StatusConflict, "conflict", "username, email or phone number already taken")
 			return
 		}
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "force update user failed")
@@ -325,4 +415,56 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"user": userResponse(user)})
+}
+
+func normalizePhoneNumber(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	var normalized strings.Builder
+	for i, r := range value {
+		if r >= '0' && r <= '9' {
+			normalized.WriteRune(r)
+			continue
+		}
+		if r == '+' && i == 0 {
+			normalized.WriteRune(r)
+			continue
+		}
+		if r == ' ' || r == '-' || r == '(' || r == ')' {
+			continue
+		}
+		return "", false
+	}
+	text := normalized.String()
+	digitCount := 0
+	for _, r := range text {
+		if r >= '0' && r <= '9' {
+			digitCount++
+		}
+	}
+	return text, digitCount >= 5 && digitCount <= 20
+}
+
+func isValidAvatarKey(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }

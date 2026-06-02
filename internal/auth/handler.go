@@ -283,7 +283,7 @@ func (h *Handler) changePassword(c *gin.Context) {
 func (h *Handler) listSessions(c *gin.Context) {
 	userID := getUserID(c)
 	sid := getSessionID(c)
-	sessions, err := model.ListActiveSessions(h.DB, userID)
+	sessions, err := model.ListRecentSessions(h.DB, userID, 20)
 	if err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "query failed")
 		return
@@ -295,9 +295,11 @@ func (h *Handler) listSessions(c *gin.Context) {
 			ID:         s.ID,
 			UserAgent:  s.UserAgent,
 			IPAddress:  s.IPAddress,
+			Location:   sessionLocation(s.IPAddress),
 			CreatedAt:  s.CreatedAt,
 			LastUsedAt: s.LastUsedAt,
 			ExpiresAt:  s.ExpiresAt,
+			RevokedAt:  s.RevokedAt,
 			IsCurrent:  s.ID == sid,
 		})
 	}
@@ -385,6 +387,10 @@ func userResponse(user *model.User) UserResponse {
 		defaultAvatar = "blue-3"
 	}
 	bio := user.Bio.String
+	gender := user.Gender
+	if gender == "" {
+		gender = "secret"
+	}
 	var avatarURL *string
 	if user.AvatarURL.Valid {
 		avatarURL = &user.AvatarURL.String
@@ -406,8 +412,12 @@ func userResponse(user *model.User) UserResponse {
 		Username:            user.Username,
 		DisplayName:         displayName,
 		Bio:                 bio,
+		Gender:              gender,
 		Email:               user.Email,
 		EmailVerified:       &emailVerified,
+		EmailPublic:         user.EmailPublic,
+		PhoneNumber:         user.PhoneNumber.String,
+		PhoneNumberPublic:   user.PhoneNumberPublic,
 		AvatarURL:           avatarURL,
 		DefaultAvatarKey:    defaultAvatar,
 		IsSuperuser:         user.IsSuperuser,
@@ -420,4 +430,16 @@ func userResponse(user *model.User) UserResponse {
 
 func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func sessionLocation(ip *string) string {
+	if ip == nil || *ip == "" {
+		return "未知地点"
+	}
+	switch *ip {
+	case "127.0.0.1", "::1", "localhost":
+		return "本机"
+	default:
+		return "未知地点"
+	}
 }

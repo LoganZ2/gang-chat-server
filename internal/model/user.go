@@ -8,24 +8,29 @@ import (
 )
 
 type User struct {
-	ID                 string
-	UID                sql.NullString
-	Username           string
-	UsernameNormalized string
-	Email              string
-	EmailNormalized    string
-	PasswordHash       *string
-	Status             string
-	DisplayName        sql.NullString
-	Bio                sql.NullString
-	AvatarURL          sql.NullString
-	DefaultAvatarKey   sql.NullString
-	EmailVerified      bool
-	IsSuperuser        bool
-	UsernameUpdatedAt  sql.NullInt64
-	DeletedAt          sql.NullInt64
-	CreatedAt          int64
-	UpdatedAt          int64
+	ID                    string
+	UID                   sql.NullString
+	Username              string
+	UsernameNormalized    string
+	Email                 string
+	EmailNormalized       string
+	PasswordHash          *string
+	Status                string
+	DisplayName           sql.NullString
+	Bio                   sql.NullString
+	Gender                string
+	AvatarURL             sql.NullString
+	DefaultAvatarKey      sql.NullString
+	EmailVerified         bool
+	EmailPublic           bool
+	PhoneNumber           sql.NullString
+	PhoneNumberNormalized sql.NullString
+	PhoneNumberPublic     bool
+	IsSuperuser           bool
+	UsernameUpdatedAt     sql.NullInt64
+	DeletedAt             sql.NullInt64
+	CreatedAt             int64
+	UpdatedAt             int64
 }
 
 func CreateUser(db *sql.DB, id, username, usernameNorm, email, emailNorm, passwordHash string) (*User, error) {
@@ -49,13 +54,17 @@ func GetUserByID(db *sql.DB, id string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
 		`SELECT id, uid, username, username_normalized, email, email_normalized, password_hash,
-		        status, display_name, bio, avatar_url, default_avatar_key, email_verified,
-		        is_superuser, username_updated_at, deleted_at, created_at, updated_at
+		        status, display_name, bio, gender, avatar_url, default_avatar_key,
+		        email_verified, email_public, phone_number, phone_number_normalized,
+		        phone_number_public, is_superuser, username_updated_at, deleted_at,
+		        created_at, updated_at
 		 FROM users WHERE id = ?`, id,
 	).Scan(
 		&u.ID, &u.UID, &u.Username, &u.UsernameNormalized, &u.Email, &u.EmailNormalized, &u.PasswordHash,
-		&u.Status, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.DefaultAvatarKey, &u.EmailVerified,
-		&u.IsSuperuser, &u.UsernameUpdatedAt, &u.DeletedAt, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.DisplayName, &u.Bio, &u.Gender, &u.AvatarURL, &u.DefaultAvatarKey,
+		&u.EmailVerified, &u.EmailPublic, &u.PhoneNumber, &u.PhoneNumberNormalized,
+		&u.PhoneNumberPublic, &u.IsSuperuser, &u.UsernameUpdatedAt, &u.DeletedAt,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -74,14 +83,18 @@ func GetUserByUsernameOrEmail(db *sql.DB, login string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
 		`SELECT id, uid, username, username_normalized, email, email_normalized, password_hash,
-		        status, display_name, bio, avatar_url, default_avatar_key, email_verified,
-		        is_superuser, username_updated_at, deleted_at, created_at, updated_at
+		        status, display_name, bio, gender, avatar_url, default_avatar_key,
+		        email_verified, email_public, phone_number, phone_number_normalized,
+		        phone_number_public, is_superuser, username_updated_at, deleted_at,
+		        created_at, updated_at
 		 FROM users WHERE username_normalized = ? OR email_normalized = ?`,
 		norm, norm,
 	).Scan(
 		&u.ID, &u.UID, &u.Username, &u.UsernameNormalized, &u.Email, &u.EmailNormalized, &u.PasswordHash,
-		&u.Status, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.DefaultAvatarKey, &u.EmailVerified,
-		&u.IsSuperuser, &u.UsernameUpdatedAt, &u.DeletedAt, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.DisplayName, &u.Bio, &u.Gender, &u.AvatarURL, &u.DefaultAvatarKey,
+		&u.EmailVerified, &u.EmailPublic, &u.PhoneNumber, &u.PhoneNumberNormalized,
+		&u.PhoneNumberPublic, &u.IsSuperuser, &u.UsernameUpdatedAt, &u.DeletedAt,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -147,13 +160,17 @@ func GetUserByIDLoose(db *sql.DB, id string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
 		`SELECT id, uid, username, username_normalized, email, email_normalized, password_hash,
-		        status, display_name, bio, avatar_url, default_avatar_key, email_verified,
-		        is_superuser, username_updated_at, deleted_at, created_at, updated_at
+		        status, display_name, bio, gender, avatar_url, default_avatar_key,
+		        email_verified, email_public, phone_number, phone_number_normalized,
+		        phone_number_public, is_superuser, username_updated_at, deleted_at,
+		        created_at, updated_at
 		 FROM users WHERE id = ?`, id,
 	).Scan(
 		&u.ID, &u.UID, &u.Username, &u.UsernameNormalized, &u.Email, &u.EmailNormalized, &u.PasswordHash,
-		&u.Status, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.DefaultAvatarKey, &u.EmailVerified,
-		&u.IsSuperuser, &u.UsernameUpdatedAt, &u.DeletedAt, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.DisplayName, &u.Bio, &u.Gender, &u.AvatarURL, &u.DefaultAvatarKey,
+		&u.EmailVerified, &u.EmailPublic, &u.PhoneNumber, &u.PhoneNumberNormalized,
+		&u.PhoneNumberPublic, &u.IsSuperuser, &u.UsernameUpdatedAt, &u.DeletedAt,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	return u, err
 }

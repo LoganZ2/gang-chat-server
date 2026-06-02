@@ -100,6 +100,32 @@ func ListActiveSessions(db *sql.DB, userID string) ([]UserSession, error) {
 	return sessions, nil
 }
 
+func ListRecentSessions(db *sql.DB, userID string, limit int) ([]UserSession, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := db.Query(
+		`SELECT id, user_id, refresh_token_hash, user_agent, ip_address, expires_at, revoked_at, created_at, last_used_at
+		 FROM user_sessions
+		 WHERE user_id = ?
+		 ORDER BY last_used_at DESC, created_at DESC
+		 LIMIT ?`, userID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []UserSession
+	for rows.Next() {
+		s := UserSession{}
+		if err := rows.Scan(&s.ID, &s.UserID, &s.RefreshTokenHash, &s.UserAgent, &s.IPAddress, &s.ExpiresAt, &s.RevokedAt, &s.CreatedAt, &s.LastUsedAt); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, s)
+	}
+	return sessions, nil
+}
+
 func RevokeAllOtherSessions(db *sql.DB, userID, keepSessionID string) error {
 	now := time.Now().Unix()
 	_, err := db.Exec(
