@@ -30,18 +30,18 @@ func (h *Handler) uploadFile(c *gin.Context) {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
+	assetStore := h.assetStore()
 	id := newID("ast")
 	filename := safeAssetFilename(header.Filename, mimeType)
-	assetDir := "assets"
-	if h.Cfg != nil && h.Cfg.AssetDir != "" {
-		assetDir = h.Cfg.AssetDir
+	diskPath, err := assetStore.CachePath(id, filename)
+	if err != nil {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid asset filename")
+		return
 	}
-	diskDir := filepath.Join(assetDir, id)
-	if err := os.MkdirAll(diskDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(diskPath), 0o755); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create asset directory failed")
 		return
 	}
-	diskPath := filepath.Join(diskDir, filename)
 	sizeBytes, detectedMime, err := writeUploadedAsset(diskPath, file)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "store uploaded file failed")
@@ -55,16 +55,23 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "image file is required")
 		return
 	}
+	storageKey := assetStore.ObjectKey(id, filename)
+	if err := assetStore.PutCachedFile(c.Request.Context(), storageKey, diskPath, mimeType); err != nil {
+		_ = os.Remove(diskPath)
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "upload asset object failed")
+		return
+	}
 	now := nowMillis()
-	url := "/assets/" + id + "/" + filename
+	url := assetStore.PublicURL(storageKey, id, filename)
 	thumb := url
 	_, err = h.DB.Exec(
-		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, thumbnail_url, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, currentUserID(c), purpose, filename, mimeType, sizeBytes, url, thumb, now,
+		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, thumbnail_url, storage_key, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, currentUserID(c), purpose, filename, mimeType, sizeBytes, url, thumb, storageKey, now,
 	)
 	if err != nil {
 		_ = os.Remove(diskPath)
+		_ = assetStore.Delete(c.Request.Context(), storageKey)
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "store asset failed")
 		return
 	}

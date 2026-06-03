@@ -16,6 +16,16 @@ type Config struct {
 	LoginMaxAttempts       int
 	LoginWindowSeconds     int64
 	AssetDir               string
+	StorageBackend         string
+	AssetPublicBaseURL     string
+	AssetObjectPrefix      string
+	AssetCacheControl      string
+	COSBucket              string
+	COSRegion              string
+	COSBucketURL           string
+	COSSecretID            string
+	COSSecretKey           string
+	COSSessionToken        string
 	GeoIPDatabasePath      string
 	TrustedProxies         []string
 	LiveKitHost            string
@@ -68,6 +78,16 @@ func Load() *Config {
 		LoginMaxAttempts:       int(envIntOr("GANG_LOGIN_MAX_ATTEMPTS", 5)),
 		LoginWindowSeconds:     envIntOr("GANG_LOGIN_WINDOW_SECONDS", 900),
 		AssetDir:               envOr("GANG_ASSET_DIR", "assets"),
+		StorageBackend:         envOr("GANG_STORAGE_BACKEND", "local"),
+		AssetPublicBaseURL:     envOr("GANG_ASSET_PUBLIC_BASE_URL", ""),
+		AssetObjectPrefix:      envOr("GANG_ASSET_OBJECT_PREFIX", "assets"),
+		AssetCacheControl:      envOr("GANG_ASSET_CACHE_CONTROL", "public, max-age=31536000, immutable"),
+		COSBucket:              envOr("GANG_COS_BUCKET", ""),
+		COSRegion:              envOr("GANG_COS_REGION", ""),
+		COSBucketURL:           envOr("GANG_COS_BUCKET_URL", ""),
+		COSSecretID:            envOr("GANG_COS_SECRET_ID", ""),
+		COSSecretKey:           envOr("GANG_COS_SECRET_KEY", ""),
+		COSSessionToken:        envOr("GANG_COS_SESSION_TOKEN", ""),
 		GeoIPDatabasePath:      envOr("GANG_GEOIP_DB_PATH", ""),
 		TrustedProxies:         envListOr("GANG_TRUSTED_PROXIES", []string{"127.0.0.1", "::1"}),
 		LiveKitHost:            envOr("LIVEKIT_HOST", "http://localhost:7880"),
@@ -79,7 +99,10 @@ func Load() *Config {
 	flag.StringVar(&cfg.Bind, "bind", cfg.Bind, "listen address")
 	flag.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "JWT signing secret")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "SQLite database path")
-	flag.StringVar(&cfg.AssetDir, "asset-dir", cfg.AssetDir, "uploaded asset directory")
+	flag.StringVar(&cfg.AssetDir, "asset-dir", cfg.AssetDir, "local asset cache directory")
+	flag.StringVar(&cfg.StorageBackend, "storage-backend", cfg.StorageBackend, "asset storage backend: local or cos")
+	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/COS public base URL for asset URLs")
+	flag.StringVar(&cfg.AssetObjectPrefix, "asset-object-prefix", cfg.AssetObjectPrefix, "object storage prefix for uploaded assets")
 	flag.StringVar(&cfg.GeoIPDatabasePath, "geoip-db", cfg.GeoIPDatabasePath, "MaxMind GeoIP database path")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
 	flag.Parse()

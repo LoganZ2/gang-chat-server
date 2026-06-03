@@ -13,6 +13,7 @@ import (
 	livekithandler "github.com/zhuangkaiyi/gang-chat/server/internal/livekit"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/livekitwebhook"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/middleware"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
@@ -22,6 +23,10 @@ func main() {
 	cfg := config.Load()
 
 	pool := db.Connect(cfg.DatabaseURL)
+	assetStore, err := storage.NewAssetStorage(cfg)
+	if err != nil {
+		log.Fatalf("configure asset storage: %v", err)
+	}
 
 	roomClient := lksdk.NewRoomServiceClient(
 		cfg.LiveKitHost,
@@ -47,7 +52,7 @@ func main() {
 
 	r.GET("/health", func(c *gin.Context) { c.String(200, "ok") })
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
-	r.Static("/assets", cfg.AssetDir)
+	chat.RegisterAssetRoutes(r, pool, cfg, assetStore)
 
 	api := r.Group("/api/v1")
 	auth.RegisterRoutes(api, pool, cfg)
@@ -55,7 +60,7 @@ func main() {
 	authMW := &auth.AuthMiddleware{DB: pool, JWTSecret: cfg.JWTSecret}
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
-	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus, liveController)
+	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus, liveController, assetStore)
 
 	lkGroup := r.Group("/livekit")
 	lkGroup.Use(authMW.Handle)

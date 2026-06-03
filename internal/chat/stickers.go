@@ -3,6 +3,7 @@ package chat
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -34,7 +35,7 @@ func (h *Handler) listStickerPacks(c *gin.Context) {
 		return
 	}
 	defer rows.Close()
-	packs := make([]gin.H, 0)
+	packs := make([]stickerPackData, 0)
 	for rows.Next() {
 		var id, packScope, name string
 		var packRoomID sql.NullString
@@ -44,9 +45,16 @@ func (h *Handler) listStickerPacks(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "read sticker pack failed")
 			return
 		}
-		packs = append(packs, h.stickerPackPayload(id, packScope, nullableString(packRoomID), name, sortOrder, updatedAt))
+		packs = append(packs, stickerPackData{
+			ID:        id,
+			Scope:     packScope,
+			RoomID:    nullableString(packRoomID),
+			Name:      name,
+			SortOrder: sortOrder,
+			UpdatedAt: updatedAt,
+		})
 	}
-	c.JSON(http.StatusOK, gin.H{"packs": packs})
+	c.JSON(http.StatusOK, gin.H{"packs": h.stickerPackPayloads(packs)})
 }
 
 func (h *Handler) createStickerPack(c *gin.Context) {
@@ -281,7 +289,7 @@ func (h *Handler) downloadStickers(c *gin.Context) {
 	}
 	if len(items) == 1 {
 		item := items[0]
-		data, err := os.ReadFile(h.assetDiskPath(item.AssetID, item.Filename))
+		data, err := h.downloadableStickerBytes(c.Request.Context(), item)
 		if err != nil {
 			h.jsonError(c, http.StatusNotFound, "not_found", "sticker file not found")
 			return
@@ -296,7 +304,7 @@ func (h *Handler) downloadStickers(c *gin.Context) {
 	archive := zip.NewWriter(&buffer)
 	usedNames := make(map[string]int, len(items))
 	for _, item := range items {
-		data, err := os.ReadFile(h.assetDiskPath(item.AssetID, item.Filename))
+		data, err := h.downloadableStickerBytes(c.Request.Context(), item)
 		if err != nil {
 			_ = archive.Close()
 			h.jsonError(c, http.StatusNotFound, "not_found", "sticker file not found")
@@ -418,12 +426,41 @@ func (h *Handler) stickerPackByID(id string) gin.H {
 	return h.stickerPackPayload(id, scope, nullableString(roomID), name, sortOrder, updatedAt)
 }
 
+type stickerPackData struct {
+	ID        string
+	Scope     string
+	RoomID    *string
+	Name      string
+	SortOrder int
+	UpdatedAt int64
+}
+
+func (h *Handler) stickerPackPayloads(packs []stickerPackData) []gin.H {
+	if len(packs) == 0 {
+		return []gin.H{}
+	}
+	packIDs := make([]string, 0, len(packs))
+	for _, pack := range packs {
+		packIDs = append(packIDs, pack.ID)
+	}
+	stickersByPack := h.stickersByPackID(packIDs)
+	payloads := make([]gin.H, 0, len(packs))
+	for _, pack := range packs {
+		payloads = append(payloads, stickerPackPayloadWithStickers(pack.ID, pack.Scope, pack.RoomID, pack.Name, pack.SortOrder, pack.UpdatedAt, stickersByPack[pack.ID]))
+	}
+	return payloads
+}
+
 func (h *Handler) stickerPackPayload(id, scope string, roomID *string, name string, sortOrder int, updatedAt int64) gin.H {
+	return stickerPackPayloadWithStickers(id, scope, roomID, name, sortOrder, updatedAt, h.stickersForPack(id))
+}
+
+func (h *Handler) stickersForPack(packID string) []gin.H {
 	rows, _ := h.DB.Query(
 		`SELECT s.id, s.name, s.sort_order, a.id, a.url, a.thumbnail_url, a.mime_type, a.width, a.height, a.created_at
 		 FROM stickers s JOIN assets a ON a.id = s.asset_id
 		 WHERE s.pack_id = ? ORDER BY s.sort_order ASC`,
-		id,
+		packID,
 	)
 	stickers := make([]gin.H, 0)
 	if rows != nil {
@@ -441,6 +478,52 @@ func (h *Handler) stickerPackPayload(id, scope string, roomID *string, name stri
 				})
 			}
 		}
+	}
+	return stickers
+}
+
+func (h *Handler) stickersByPackID(packIDs []string) map[string][]gin.H {
+	result := make(map[string][]gin.H, len(packIDs))
+	if len(packIDs) == 0 {
+		return result
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(packIDs)), ",")
+	args := make([]any, 0, len(packIDs))
+	for _, packID := range packIDs {
+		args = append(args, packID)
+	}
+	rows, err := h.DB.Query(
+		fmt.Sprintf(
+			`SELECT s.pack_id, s.id, s.name, s.sort_order, a.id, a.url, a.thumbnail_url, a.mime_type, a.width, a.height, a.created_at
+			 FROM stickers s JOIN assets a ON a.id = s.asset_id
+			 WHERE s.pack_id IN (%s) ORDER BY s.pack_id ASC, s.sort_order ASC`,
+			placeholders,
+		),
+		args...,
+	)
+	if err != nil || rows == nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var packID, stickerID, stickerName, assetID, url, mimeType string
+		var thumb sql.NullString
+		var stickerSort int
+		var width, height sql.NullInt64
+		var createdAt int64
+		if err := rows.Scan(&packID, &stickerID, &stickerName, &stickerSort, &assetID, &url, &thumb, &mimeType, &width, &height, &createdAt); err == nil {
+			result[packID] = append(result[packID], gin.H{
+				"id": stickerID, "name": stickerName, "sort_order": stickerSort,
+				"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": nullableString(thumb), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
+			})
+		}
+	}
+	return result
+}
+
+func stickerPackPayloadWithStickers(id, scope string, roomID *string, name string, sortOrder int, updatedAt int64, stickers []gin.H) gin.H {
+	if stickers == nil {
+		stickers = []gin.H{}
 	}
 	return gin.H{"id": id, "scope": scope, "room_id": roomID, "name": name, "stickers": stickers, "sort_order": sortOrder, "updated_at": formatMillis(updatedAt)}
 }
@@ -579,24 +662,38 @@ func (h *Handler) touchStickerPack(packID string) {
 }
 
 type downloadableSticker struct {
-	ID       string
-	Name     string
-	AssetID  string
-	Filename string
-	MimeType string
+	ID         string
+	Name       string
+	AssetID    string
+	Filename   string
+	MimeType   string
+	StorageKey string
 }
 
 func (h *Handler) downloadableSticker(stickerID, userID string) (downloadableSticker, bool) {
 	var item downloadableSticker
 	err := h.DB.QueryRow(
-		`SELECT s.id, s.name, a.id, a.filename, a.mime_type
+		`SELECT s.id, s.name, a.id, a.filename, a.mime_type, COALESCE(a.storage_key, '')
 		 FROM stickers s
 		 JOIN sticker_packs p ON p.id = s.pack_id
 		 JOIN assets a ON a.id = s.asset_id
 		 WHERE s.id = ? AND p.scope = 'personal' AND p.owner_user_id = ?`,
 		stickerID, userID,
-	).Scan(&item.ID, &item.Name, &item.AssetID, &item.Filename, &item.MimeType)
+	).Scan(&item.ID, &item.Name, &item.AssetID, &item.Filename, &item.MimeType, &item.StorageKey)
 	return item, err == nil
+}
+
+func (h *Handler) downloadableStickerBytes(ctx context.Context, item downloadableSticker) ([]byte, error) {
+	assetStore := h.assetStore()
+	storageKey := item.StorageKey
+	if storageKey == "" {
+		storageKey = assetStore.ObjectKey(item.AssetID, item.Filename)
+	}
+	path, err := assetStore.EnsureCached(ctx, storageKey, item.AssetID, item.Filename)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
 }
 
 func parseStickerIDList(raw string) []string {
@@ -611,14 +708,6 @@ func parseStickerIDList(raw string) []string {
 		ids = append(ids, id)
 	}
 	return ids
-}
-
-func (h *Handler) assetDiskPath(assetID, filename string) string {
-	assetDir := "assets"
-	if h.Cfg != nil && h.Cfg.AssetDir != "" {
-		assetDir = h.Cfg.AssetDir
-	}
-	return filepath.Join(assetDir, assetID, filename)
 }
 
 func safeDownloadFilename(name, fallback string) string {
