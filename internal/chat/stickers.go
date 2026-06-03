@@ -6,9 +6,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -689,11 +689,12 @@ func (h *Handler) downloadableStickerBytes(ctx context.Context, item downloadabl
 	if storageKey == "" {
 		storageKey = assetStore.ObjectKey(item.AssetID, item.Filename)
 	}
-	path, err := assetStore.EnsureCached(ctx, storageKey, item.AssetID, item.Filename)
+	body, err := assetStore.Open(ctx, storageKey, item.AssetID, item.Filename)
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(path)
+	defer body.Close()
+	return io.ReadAll(body)
 }
 
 func parseStickerIDList(raw string) []string {

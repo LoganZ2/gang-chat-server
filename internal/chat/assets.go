@@ -25,10 +25,22 @@ func RegisterAssetRoutes(r gin.IRouter, db *sql.DB, cfg *config.Config, assetSto
 		filename := c.Param("filename")
 		storageKey, mimeType, err := assetRouteMetadata(db, assetStore, assetID, filename)
 		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "asset not found"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "read asset metadata failed"})
 			return
 		}
-		cachePath, err := assetStore.EnsureCached(c.Request.Context(), storageKey, assetID, filename)
+		if assetStore.HasPublicBase() {
+			c.Header("Cache-Control", assetStore.CacheControl())
+			if mimeType != "" {
+				c.Header("Content-Type", mimeType)
+			}
+			c.Redirect(http.StatusFound, assetStore.PublicURL(storageKey, assetID, filename))
+			return
+		}
+		body, err := assetStore.Open(c.Request.Context(), storageKey, assetID, filename)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "asset not found"})
@@ -37,11 +49,20 @@ func RegisterAssetRoutes(r gin.IRouter, db *sql.DB, cfg *config.Config, assetSto
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "read asset failed"})
 			return
 		}
+		defer body.Close()
 		c.Header("Cache-Control", assetStore.CacheControl())
 		if mimeType != "" {
 			c.Header("Content-Type", mimeType)
 		}
-		c.File(cachePath)
+		if c.Request.Method == http.MethodHead {
+			c.Status(http.StatusOK)
+			return
+		}
+		contentType := mimeType
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		c.DataFromReader(http.StatusOK, -1, contentType, body, nil)
 	}
 	r.GET("/assets/:asset_id/:filename", handler)
 	r.HEAD("/assets/:asset_id/:filename", handler)
@@ -51,7 +72,7 @@ func assetRouteMetadata(db *sql.DB, assetStore *storage.AssetStorage, assetID, f
 	var storageKey sql.NullString
 	var mimeType sql.NullString
 	err := db.QueryRow(`SELECT storage_key, mime_type FROM assets WHERE id = ? AND filename = ?`, assetID, filename).Scan(&storageKey, &mimeType)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil {
 		return "", "", err
 	}
 	key := ""

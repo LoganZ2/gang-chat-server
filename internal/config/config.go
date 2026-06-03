@@ -33,6 +33,7 @@ type Config struct {
 	COSSecretID            string
 	COSSecretKey           string
 	COSSessionToken        string
+	COSObjectACL           string
 	GeoIPDatabasePath      string
 	TrustedProxies         []string
 	LiveKitHost            string
@@ -97,6 +98,7 @@ func Load() *Config {
 		COSSecretID:            envOr("GANG_COS_SECRET_ID", ""),
 		COSSecretKey:           envOr("GANG_COS_SECRET_KEY", ""),
 		COSSessionToken:        envOr("GANG_COS_SESSION_TOKEN", ""),
+		COSObjectACL:           envOr("GANG_COS_OBJECT_ACL", "public-read"),
 		GeoIPDatabasePath:      envOr("GANG_GEOIP_DB_PATH", ""),
 		TrustedProxies:         envListOr("GANG_TRUSTED_PROXIES", []string{"127.0.0.1", "::1"}),
 		LiveKitHost:            envOr("LIVEKIT_HOST", "http://localhost:7880"),
@@ -114,6 +116,7 @@ func Load() *Config {
 	flag.StringVar(&cfg.AssetObjectPrefix, "asset-object-prefix", cfg.AssetObjectPrefix, "object storage prefix for uploaded assets")
 	flag.Int64Var(&cfg.AssetUploadMaxBytes, "asset-upload-max-bytes", cfg.AssetUploadMaxBytes, "maximum uploaded file size in bytes")
 	flag.Int64Var(&cfg.ImageUploadMaxBytes, "image-upload-max-bytes", cfg.ImageUploadMaxBytes, "maximum uploaded image size in bytes")
+	flag.StringVar(&cfg.COSObjectACL, "cos-object-acl", cfg.COSObjectACL, "COS object ACL for uploaded assets; empty keeps bucket default")
 	flag.StringVar(&cfg.GeoIPDatabasePath, "geoip-db", cfg.GeoIPDatabasePath, "MaxMind GeoIP database path")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
 	flag.Parse()
