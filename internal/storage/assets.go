@@ -69,6 +69,9 @@ func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 			return nil, err
 		}
 		store.remote = remote
+		if store.publicBase == "" {
+			store.publicBase = remote.publicBase
+		}
 		return store, nil
 	default:
 		return nil, fmt.Errorf("unsupported storage backend %q", backend)
@@ -80,6 +83,14 @@ func (s *AssetStorage) CacheControl() string {
 		return defaultAssetCacheControl
 	}
 	return s.cacheControl
+}
+
+func (s *AssetStorage) RemoteEnabled() bool {
+	return s != nil && s.remote != nil
+}
+
+func (s *AssetStorage) HasPublicBase() bool {
+	return s != nil && s.publicBase != ""
 }
 
 func (s *AssetStorage) ObjectKey(assetID, filename string) string {
@@ -112,7 +123,7 @@ func (s *AssetStorage) CachePath(assetID, filename string) (string, error) {
 	return filepath.Join(cacheDir, assetID, filename), nil
 }
 
-func (s *AssetStorage) PutCachedFile(ctx context.Context, key, filePath, mimeType string) error {
+func (s *AssetStorage) PutFile(ctx context.Context, key, filePath, mimeType string) error {
 	if s == nil || s.remote == nil {
 		return nil
 	}
@@ -126,52 +137,21 @@ func (s *AssetStorage) Delete(ctx context.Context, key string) error {
 	return s.remote.Delete(ctx, cleanObjectKey(key))
 }
 
-func (s *AssetStorage) EnsureCached(ctx context.Context, key, assetID, filename string) (string, error) {
-	cachePath, err := s.CachePath(assetID, filename)
+func (s *AssetStorage) Open(ctx context.Context, key, assetID, filename string) (io.ReadCloser, error) {
+	if s != nil && s.remote != nil {
+		return s.remote.Get(ctx, cleanObjectKey(key))
+	}
+	localPath, err := s.CachePath(assetID, filename)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if _, err := os.Stat(cachePath); err == nil {
-		return cachePath, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	if s == nil || s.remote == nil {
-		return "", os.ErrNotExist
-	}
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
-		return "", err
-	}
-	body, err := s.remote.Get(ctx, cleanObjectKey(key))
-	if err != nil {
-		return "", err
-	}
-	defer body.Close()
-
-	tmp, err := os.CreateTemp(filepath.Dir(cachePath), ".asset-*")
-	if err != nil {
-		return "", err
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := io.Copy(tmp, body); err != nil {
-		_ = tmp.Close()
-		return "", err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmpPath, cachePath); err != nil {
-		if _, statErr := os.Stat(cachePath); statErr == nil {
-			return cachePath, nil
-		}
-		return "", err
-	}
-	return cachePath, nil
+	return os.Open(localPath)
 }
 
 type cosRemote struct {
-	client *cos.Client
+	client     *cos.Client
+	publicBase string
+	objectACL  string
 }
 
 func newCOSRemote(cfg *config.Config) (*cosRemote, error) {
@@ -181,12 +161,9 @@ func newCOSRemote(cfg *config.Config) (*cosRemote, error) {
 	if cfg.COSSecretID == "" || cfg.COSSecretKey == "" {
 		return nil, errors.New("COS storage requires GANG_COS_SECRET_ID and GANG_COS_SECRET_KEY")
 	}
-	bucketURL := strings.TrimSpace(cfg.COSBucketURL)
-	if bucketURL == "" {
-		if cfg.COSBucket == "" || cfg.COSRegion == "" {
-			return nil, errors.New("COS storage requires GANG_COS_BUCKET and GANG_COS_REGION, or GANG_COS_BUCKET_URL")
-		}
-		bucketURL = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.COSBucket, cfg.COSRegion)
+	bucketURL, err := cosBucketURL(cfg)
+	if err != nil {
+		return nil, err
 	}
 	u, err := url.Parse(bucketURL)
 	if err != nil {
@@ -202,7 +179,11 @@ func newCOSRemote(cfg *config.Config) (*cosRemote, error) {
 			},
 		},
 	)
-	return &cosRemote{client: client}, nil
+	return &cosRemote{
+		client:     client,
+		publicBase: strings.TrimRight(bucketURL, "/"),
+		objectACL:  strings.TrimSpace(cfg.COSObjectACL),
+	}, nil
 }
 
 func (r *cosRemote) PutFile(ctx context.Context, key, filePath, mimeType, cacheControl string) error {
@@ -211,6 +192,9 @@ func (r *cosRemote) PutFile(ctx context.Context, key, filePath, mimeType, cacheC
 			ContentType:  mimeType,
 			CacheControl: cacheControl,
 		},
+	}
+	if r.objectACL != "" {
+		options.ACLHeaderOptions = &cos.ACLHeaderOptions{XCosACL: r.objectACL}
 	}
 	_, err := r.client.Object.PutFromFile(ctx, key, filePath, options)
 	return err
@@ -227,6 +211,17 @@ func (r *cosRemote) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 func (r *cosRemote) Delete(ctx context.Context, key string) error {
 	_, err := r.client.Object.Delete(ctx, key)
 	return err
+}
+
+func cosBucketURL(cfg *config.Config) (string, error) {
+	bucketURL := strings.TrimSpace(cfg.COSBucketURL)
+	if bucketURL == "" {
+		if cfg.COSBucket == "" || cfg.COSRegion == "" {
+			return "", errors.New("COS storage requires GANG_COS_BUCKET and GANG_COS_REGION, or GANG_COS_BUCKET_URL")
+		}
+		bucketURL = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.COSBucket, cfg.COSRegion)
+	}
+	return strings.TrimRight(bucketURL, "/"), nil
 }
 
 func cleanObjectKey(value string) string {

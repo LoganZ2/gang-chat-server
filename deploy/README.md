@@ -39,19 +39,18 @@ Run them on the **server**, from the deploy directory:
    in this server-side `.env`:
    ```
    GANG_STORAGE_BACKEND=cos
-   GANG_ASSET_DIR=assets-cache
    GANG_ASSET_OBJECT_PREFIX=assets
+   GANG_ASSET_PUBLIC_BASE_URL=https://<bucket-name-with-appid>.cos.<region>.myqcloud.com
    GANG_COS_BUCKET=<bucket-name-with-appid>
    GANG_COS_REGION=<region, e.g. ap-shanghai>
    GANG_COS_SECRET_ID=<secret id>
    GANG_COS_SECRET_KEY=<secret key>
-
-   # Optional. Leave empty to serve `/assets/...` through the backend cache.
-   # Set to a COS public endpoint or CDN root to return direct object URLs.
-   GANG_ASSET_PUBLIC_BASE_URL=
+   GANG_COS_OBJECT_ACL=public-read
    ```
-   `GANG_ASSET_DIR` is only the local cache when COS is enabled; COS remains
-   the source of truth.
+   With `GANG_ASSET_PUBLIC_BASE_URL` set, uploads are written to COS and API
+   payloads return COS/CDN URLs. Asset reads do not pass through the backend and
+   no local asset cache is kept. Replace the COS endpoint with a CDN root when
+   CDN is enabled.
 5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
 6. First boot: `./start.sh all`.
 

@@ -64,18 +64,37 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		filenameMime = "image/png"
 	}
 	filename := safeAssetFilename(header.Filename, filenameMime)
-	diskPath, err := assetStore.CachePath(id, filename)
-	if err != nil {
-		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid asset filename")
-		return
+	assetPath := ""
+	cleanupUploadTarget := func() {}
+	if assetStore.RemoteEnabled() {
+		tmp, err := os.CreateTemp("", "gang-chat-asset-*"+filepath.Ext(filename))
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create upload temp file failed")
+			return
+		}
+		assetPath = tmp.Name()
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(assetPath)
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create upload temp file failed")
+			return
+		}
+		cleanupUploadTarget = func() { _ = os.Remove(assetPath) }
+	} else {
+		assetPath, err = assetStore.CachePath(id, filename)
+		if err != nil {
+			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid asset filename")
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(assetPath), 0o755); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create asset directory failed")
+			return
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(diskPath), 0o755); err != nil {
-		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create asset directory failed")
-		return
-	}
-	sizeBytes, detectedMime, err := writeUploadedAsset(diskPath, file, maxFileBytes)
+	defer cleanupUploadTarget()
+
+	sizeBytes, detectedMime, err := writeUploadedAsset(assetPath, file, maxFileBytes)
 	if err != nil {
-		_ = os.Remove(diskPath)
+		_ = os.Remove(assetPath)
 		if uploadTooLarge(err) {
 			h.jsonError(c, http.StatusRequestEntityTooLarge, "payload_too_large", "uploaded file is too large")
 			return
@@ -88,7 +107,7 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		mimeType = detectedMime
 	}
 	if isImageUpload && !strings.HasPrefix(mimeType, "image/") {
-		_ = os.Remove(diskPath)
+		_ = os.Remove(assetPath)
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "image file is required")
 		return
 	}
@@ -97,7 +116,7 @@ func (h *Handler) uploadFile(c *gin.Context) {
 	thumb := any(nil)
 	if strings.HasPrefix(mimeType, "image/") {
 		thumb = assetStore.PublicURL(assetStore.ObjectKey(id, filename), id, filename)
-		width, height := uploadedImageSize(diskPath)
+		width, height := uploadedImageSize(assetPath)
 		if width.Valid {
 			widthValue = width.Int64
 		}
@@ -106,8 +125,8 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		}
 	}
 	storageKey := assetStore.ObjectKey(id, filename)
-	if err := assetStore.PutCachedFile(c.Request.Context(), storageKey, diskPath, mimeType); err != nil {
-		_ = os.Remove(diskPath)
+	if err := assetStore.PutFile(c.Request.Context(), storageKey, assetPath, mimeType); err != nil {
+		_ = os.Remove(assetPath)
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "upload asset object failed")
 		return
 	}
@@ -119,7 +138,7 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		id, currentUserID(c), purpose, filename, mimeType, sizeBytes, url, thumb, widthValue, heightValue, storageKey, now,
 	)
 	if err != nil {
-		_ = os.Remove(diskPath)
+		_ = os.Remove(assetPath)
 		_ = assetStore.Delete(c.Request.Context(), storageKey)
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "store asset failed")
 		return
