@@ -35,8 +35,25 @@ Run them on the **server**, from the deploy directory:
    LIVEKIT_API_KEY=<key>
    LIVEKIT_API_SECRET=<secret>
    ```
-4. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
-5. First boot: `./start.sh all`.
+4. For production asset storage on Tencent COS, keep the real credentials only
+   in this server-side `.env`:
+   ```
+   GANG_STORAGE_BACKEND=cos
+   GANG_ASSET_DIR=assets-cache
+   GANG_ASSET_OBJECT_PREFIX=assets
+   GANG_COS_BUCKET=<bucket-name-with-appid>
+   GANG_COS_REGION=<region, e.g. ap-shanghai>
+   GANG_COS_SECRET_ID=<secret id>
+   GANG_COS_SECRET_KEY=<secret key>
+
+   # Optional. Leave empty to serve `/assets/...` through the backend cache.
+   # Set to a COS public endpoint or CDN root to return direct object URLs.
+   GANG_ASSET_PUBLIC_BASE_URL=
+   ```
+   `GANG_ASSET_DIR` is only the local cache when COS is enabled; COS remains
+   the source of truth.
+5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
+6. First boot: `./start.sh all`.
 
 After that, every push to `master` rebuilds and `./restart.sh gang`
 automatically. livekit is left running across deploys; restart it manually

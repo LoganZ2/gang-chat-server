@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 )
 
 // liveMediaController is the subset of LiveKit room-control operations the
@@ -28,10 +29,11 @@ func (noopLiveController) SetCanPublish(string, string, bool) error  { return ni
 func (noopLiveController) MuteMicrophone(string, string, bool) error { return nil }
 
 type Handler struct {
-	DB   *sql.DB
-	Cfg  *config.Config
-	Bus  *eventbus.Bus
-	Live liveMediaController
+	DB     *sql.DB
+	Cfg    *config.Config
+	Bus    *eventbus.Bus
+	Live   liveMediaController
+	Assets *storage.AssetStorage
 }
 
 // RegisterRoutes wires the chat API onto g and returns the handler so the
@@ -39,11 +41,19 @@ type Handler struct {
 // publish live snapshots through the same bus. bus may be nil (tests); all
 // publish paths tolerate a nil bus. live may be nil; moderation then degrades
 // to DB-only bookkeeping without driving the LiveKit media session.
-func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eventbus.Bus, live liveMediaController) *Handler {
+func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eventbus.Bus, live liveMediaController, assetStores ...*storage.AssetStorage) *Handler {
 	if live == nil {
 		live = noopLiveController{}
 	}
-	h := &Handler{DB: db, Cfg: cfg, Bus: bus, Live: live}
+	assetStore := firstAssetStore(assetStores)
+	if assetStore == nil {
+		var err error
+		assetStore, err = storage.NewAssetStorage(cfg)
+		if err != nil {
+			panic(err)
+		}
+	}
+	h := &Handler{DB: db, Cfg: cfg, Bus: bus, Live: live, Assets: assetStore}
 
 	g.GET("/me/stream", h.liveStream)
 
@@ -109,4 +119,13 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.DELETE("/rooms/:room_id/playlists/:playlist_id/tracks/:track_id", h.deleteRoomPlaylistTrack)
 
 	return h
+}
+
+func firstAssetStore(stores []*storage.AssetStorage) *storage.AssetStorage {
+	for _, store := range stores {
+		if store != nil {
+			return store
+		}
+	}
+	return nil
 }

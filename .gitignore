@@ -2,6 +2,8 @@ gang-chat.db
 gang-chat.db-wal
 gang-chat.db-shm
 .env
+assets/
+assets-cache/
 
 # Build output (reproducible via `go build`)
 /gang-server.exe
