@@ -55,11 +55,15 @@ type roomCard struct {
 	RID                  string              `json:"rid,omitempty"`
 	Name                 string              `json:"name"`
 	RemarkName           *string             `json:"remark_name"`
+	Description          string              `json:"description"`
+	Visibility           string              `json:"visibility,omitempty"`
+	JoinPolicy           string              `json:"join_policy,omitempty"`
 	AvatarURL            *string             `json:"avatar_url"`
 	DefaultAvatarKey     string              `json:"default_avatar_key"`
 	MemberCount          int                 `json:"member_count"`
 	MyRole               string              `json:"my_role,omitempty"`
 	NotificationLevel    string              `json:"notification_level,omitempty"`
+	NotificationPolicy   string              `json:"notification_policy,omitempty"`
 	LiveParticipantCount int                 `json:"live_participant_count"`
 	LiveAvatarPreview    []userSummary       `json:"live_avatar_preview"`
 	LastMessage          *lastMessagePreview `json:"last_message"`
@@ -92,23 +96,35 @@ type roomMembership struct {
 	NotificationLevel    string  `json:"notification_level,omitempty"`
 }
 
+type roomPersonalProfile struct {
+	DisplayName      *string `json:"display_name"`
+	AvatarURL        *string `json:"avatar_url"`
+	DefaultAvatarKey *string `json:"default_avatar_key"`
+}
+
 type roomDetail struct {
-	ID                         string         `json:"id"`
-	RID                        string         `json:"rid,omitempty"`
-	Name                       string         `json:"name"`
-	AvatarURL                  *string        `json:"avatar_url"`
-	DefaultAvatarKey           string         `json:"default_avatar_key"`
-	Visibility                 string         `json:"visibility,omitempty"`
-	JoinPolicy                 string         `json:"join_policy,omitempty"`
-	AIVoiceAnnounceEnabled     bool           `json:"ai_voice_announce_enabled"`
-	MessageRecallPolicy        string         `json:"message_recall_policy,omitempty"`
-	MessageRecallWindowSeconds *int64         `json:"message_recall_window_seconds"`
-	MemberCount                int            `json:"member_count"`
-	CreatedBy                  userSummary    `json:"created_by"`
-	MyMembership               roomMembership `json:"my_membership"`
-	Live                       liveState      `json:"live"`
-	CreatedAt                  string         `json:"created_at"`
-	UpdatedAt                  string         `json:"updated_at"`
+	ID                          string              `json:"id"`
+	RID                         string              `json:"rid,omitempty"`
+	Name                        string              `json:"name"`
+	Description                 string              `json:"description"`
+	AvatarURL                   *string             `json:"avatar_url"`
+	DefaultAvatarKey            string              `json:"default_avatar_key"`
+	Visibility                  string              `json:"visibility,omitempty"`
+	JoinPolicy                  string              `json:"join_policy,omitempty"`
+	AIVoiceAnnounceEnabled      bool                `json:"ai_voice_announce_enabled"`
+	AIVoiceAnnouncementsEnabled bool                `json:"ai_voice_announcements_enabled"`
+	MessageRecallPolicy         string              `json:"message_recall_policy,omitempty"`
+	MessageRecallWindowSeconds  *int64              `json:"message_recall_window_seconds"`
+	MemberCount                 int                 `json:"member_count"`
+	CreatedBy                   *userSummary        `json:"created_by"`
+	RemarkName                  *string             `json:"remark_name"`
+	NotificationPolicy          string              `json:"notification_policy,omitempty"`
+	PersonalProfile             roomPersonalProfile `json:"personal_profile"`
+	CanDeleteRoom               bool                `json:"can_delete_room"`
+	MyMembership                roomMembership      `json:"my_membership"`
+	Live                        liveState           `json:"live"`
+	CreatedAt                   string              `json:"created_at"`
+	UpdatedAt                   string              `json:"updated_at"`
 }
 
 type message struct {
@@ -160,10 +176,12 @@ type liveState struct {
 }
 
 type createRoomRequest struct {
-	Name          string  `json:"name"`
-	AvatarAssetID *string `json:"avatar_asset_id"`
-	Visibility    string  `json:"visibility"`
-	JoinPolicy    string  `json:"join_policy"`
+	Name             string  `json:"name"`
+	Description      string  `json:"description"`
+	AvatarAssetID    *string `json:"avatar_asset_id"`
+	DefaultAvatarKey *string `json:"default_avatar_key"`
+	Visibility       string  `json:"visibility"`
+	JoinPolicy       string  `json:"join_policy"`
 }
 
 type sendMessageRequest struct {
@@ -214,12 +232,13 @@ type roomRecord struct {
 	Name                       string
 	AvatarURL                  sql.NullString
 	DefaultAvatarKey           string
-	CreatedByUserID            string
+	CreatedByUserID            sql.NullString
 	Visibility                 string
 	JoinPolicy                 string
 	AIVoiceAnnounceEnabled     int
 	MessageRecallPolicy        string
 	MessageRecallWindowSeconds sql.NullInt64
+	Description                string
 	CreatedAt                  int64
 	UpdatedAt                  int64
 }
@@ -338,7 +357,7 @@ func scanRoomRecord(rows *sql.Rows) (roomRecord, error) {
 	err := rows.Scan(
 		&rec.ID, &rec.RID, &rec.Name, &rec.AvatarURL, &rec.DefaultAvatarKey, &rec.CreatedByUserID,
 		&rec.Visibility, &rec.JoinPolicy, &rec.AIVoiceAnnounceEnabled, &rec.MessageRecallPolicy,
-		&rec.MessageRecallWindowSeconds, &rec.CreatedAt, &rec.UpdatedAt,
+		&rec.MessageRecallWindowSeconds, &rec.Description, &rec.CreatedAt, &rec.UpdatedAt,
 	)
 	return rec, err
 }
@@ -349,7 +368,7 @@ func scanPublicRoomRecord(rows *sql.Rows) (roomRecord, bool, error) {
 	err := rows.Scan(
 		&rec.ID, &rec.RID, &rec.Name, &rec.AvatarURL, &rec.DefaultAvatarKey, &rec.CreatedByUserID,
 		&rec.Visibility, &rec.JoinPolicy, &rec.AIVoiceAnnounceEnabled, &rec.MessageRecallPolicy,
-		&rec.MessageRecallWindowSeconds, &rec.CreatedAt, &rec.UpdatedAt, &joined,
+		&rec.MessageRecallWindowSeconds, &rec.Description, &rec.CreatedAt, &rec.UpdatedAt, &joined,
 	)
 	return rec, joined != 0, err
 }

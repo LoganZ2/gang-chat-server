@@ -50,12 +50,23 @@ func (h *Handler) getMyRoomSettings(c *gin.Context) {
 
 func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.requireMember(c, roomID) {
-		return
-	}
 	var req myRoomSettingsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	userID := currentUserID(c)
+	if !h.isRoomMember(roomID, userID) {
+		if h.isSuperuser(userID) && h.roomIDExists(roomID) {
+			detail, err := h.buildRoomDetail(roomID, userID)
+			if err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"settings": h.myRoomSettingsPayload(roomID, userID), "room": detail})
+			return
+		}
+		h.jsonError(c, http.StatusNotFound, "not_found", "room not found")
 		return
 	}
 	sets := []string{}
@@ -68,17 +79,30 @@ func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 		sets = append(sets, "room_display_name = ?")
 		args = append(args, emptyToNil(*req.RoomDisplayName))
 	}
-	if req.NotificationLevel != nil {
-		if !allowed(*req.NotificationLevel, "all", "mentions", "muted") {
-			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid notification_level")
+	notificationPolicy := req.NotificationLevel
+	notificationField := "notification_level"
+	if req.NotificationPolicy != nil {
+		notificationPolicy = req.NotificationPolicy
+		notificationField = "notification_policy"
+	}
+	if notificationPolicy != nil {
+		if !allowed(*notificationPolicy, "all", "mentions", "muted") {
+			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid "+notificationField)
 			return
 		}
 		sets = append(sets, "notification_level = ?")
-		args = append(args, *req.NotificationLevel)
+		args = append(args, *notificationPolicy)
 	}
-	if req.RoomAvatarAssetID != nil {
+	avatarAssetID := req.RoomAvatarAssetID
+	if avatarAssetID == nil {
+		avatarAssetID = req.AvatarAssetID
+	}
+	if avatarAssetID != nil {
 		var url sql.NullString
-		_ = h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, *req.RoomAvatarAssetID, currentUserID(c)).Scan(&url)
+		assetID := strings.TrimSpace(*avatarAssetID)
+		if assetID != "" {
+			_ = h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, userID).Scan(&url)
+		}
 		sets = append(sets, "room_avatar_url = ?", "room_default_avatar_key = ?")
 		if url.Valid {
 			args = append(args, url.String, nil)
@@ -86,16 +110,30 @@ func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 			args = append(args, nil, nil)
 		}
 	}
+	if req.DefaultAvatarKey != nil {
+		key := strings.TrimSpace(*req.DefaultAvatarKey)
+		sets = append(sets, "room_default_avatar_key = ?")
+		args = append(args, emptyToNil(key))
+		if avatarAssetID == nil && key != "" && h.currentRoomProfileAvatarKey(roomID, userID) != key {
+			sets = append(sets, "room_avatar_url = ?")
+			args = append(args, nil)
+		}
+	}
 	if len(sets) == 0 {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "at least one setting is required")
 		return
 	}
-	args = append(args, roomID, currentUserID(c))
+	args = append(args, roomID, userID)
 	if _, err := h.DB.Exec(`UPDATE room_memberships SET `+strings.Join(sets, ", ")+` WHERE room_id = ? AND user_id = ?`, args...); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"settings": h.myRoomSettingsPayload(roomID, currentUserID(c))})
+	detail, err := h.buildRoomDetail(roomID, userID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"settings": h.myRoomSettingsPayload(roomID, userID), "room": detail})
 }
 
 func (h *Handler) getRoomSettings(c *gin.Context) {
@@ -129,6 +167,15 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		sets = append(sets, "name = ?")
 		args = append(args, name)
 	}
+	if req.Description != nil {
+		description := strings.TrimSpace(*req.Description)
+		if len([]rune(description)) > 500 {
+			h.jsonError(c, http.StatusBadRequest, "validation_failed", "description must be at most 500 characters")
+			return
+		}
+		sets = append(sets, "description = ?")
+		args = append(args, description)
+	}
 	if req.Visibility != nil {
 		if !allowed(*req.Visibility, "public", "private") {
 			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid visibility")
@@ -145,9 +192,40 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		sets = append(sets, "join_policy = ?")
 		args = append(args, *req.JoinPolicy)
 	}
-	if req.AIVoiceAnnounceEnabled != nil {
+	aiVoiceAnnounceEnabled := req.AIVoiceAnnounceEnabled
+	if req.AIVoiceAnnouncementsEnabled != nil {
+		aiVoiceAnnounceEnabled = req.AIVoiceAnnouncementsEnabled
+	}
+	if aiVoiceAnnounceEnabled != nil {
 		sets = append(sets, "ai_voice_announce_enabled = ?")
-		args = append(args, boolToInt(*req.AIVoiceAnnounceEnabled))
+		args = append(args, boolToInt(*aiVoiceAnnounceEnabled))
+	}
+	if req.AvatarAssetID != nil {
+		assetID := strings.TrimSpace(*req.AvatarAssetID)
+		if assetID == "" {
+			sets = append(sets, "avatar_asset_id = ?", "avatar_url = ?")
+			args = append(args, nil, nil)
+		} else {
+			var url string
+			if err := h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, currentUserID(c)).Scan(&url); err != nil {
+				h.jsonError(c, http.StatusBadRequest, "validation_failed", "avatar asset not found")
+				return
+			}
+			sets = append(sets, "avatar_asset_id = ?", "avatar_url = ?")
+			args = append(args, assetID, url)
+		}
+	}
+	if req.DefaultAvatarKey != nil {
+		key := strings.TrimSpace(*req.DefaultAvatarKey)
+		if key == "" {
+			key = defaultRoomAvatar(roomID)
+		}
+		sets = append(sets, "default_avatar_key = ?")
+		args = append(args, key)
+		if req.AvatarAssetID == nil && key != h.currentRoomAvatarKey(roomID) {
+			sets = append(sets, "avatar_asset_id = ?", "avatar_url = ?")
+			args = append(args, nil, nil)
+		}
 	}
 	if req.MessageRecallPolicy != nil {
 		if !allowed(*req.MessageRecallPolicy, "disabled", "admin_approval", "time_limited") {
@@ -169,13 +247,18 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 	// Name / avatar / visibility / join_policy etc. all live in the room-list
 	// snapshot, so every member's list entry needs to be refreshed.
 	h.publishRoomUpdated(roomID)
-	c.JSON(http.StatusOK, gin.H{"settings": h.roomSettingsPayload(roomID)})
+	detail, err := h.buildRoomDetail(roomID, currentUserID(c))
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"settings": h.roomSettingsPayload(roomID), "room": detail})
 }
 
 func (h *Handler) inviteMember(c *gin.Context) {
 	roomID := c.Param("room_id")
 	inviterID := currentUserID(c)
-	if !h.requireMember(c, roomID) {
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 	var req userIDRequest
@@ -294,6 +377,17 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "room": detail, "invite": h.roomInvitePayload(inviteID, userID)})
 		return
 	}
+	if h.isSuperuser(userID) {
+		_, _ = h.DB.Exec(`UPDATE room_invites SET status = 'accepted', updated_at = ? WHERE id = ?`, nowMillis(), inviteID)
+		detail, err := h.buildRoomDetail(roomID, userID)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
+			return
+		}
+		h.publishRoomInvitesUpdated(userID)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "room": detail, "invite": h.roomInvitePayload(inviteID, userID)})
+		return
+	}
 
 	if !h.isAdmin(roomID, inviterID) {
 		tx, err := h.DB.Begin()
@@ -343,12 +437,7 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	}
 	defer tx.Rollback()
 	now := nowMillis()
-	if _, err := tx.Exec(
-		`INSERT INTO room_memberships (room_id, user_id, role, joined_at)
-		 VALUES (?, ?, 'member', ?)
-		 ON CONFLICT(room_id, user_id) DO NOTHING`,
-		roomID, userID, now,
-	); err != nil {
+	if _, err := h.addRoomMemberTx(tx, roomID, userID, now); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "accept room invite failed")
 		return
 	}
@@ -373,6 +462,10 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 func (h *Handler) removeMember(c *gin.Context) {
 	roomID := c.Param("room_id")
 	actorID := currentUserID(c)
+	if c.Param("user_id") == "me" {
+		h.leaveRoom(c)
+		return
+	}
 	if !h.isAdmin(roomID, actorID) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
 		return
@@ -397,7 +490,7 @@ func (h *Handler) removeMember(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
-	_, _ = tx.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, targetID)
+	liveRes, _ := tx.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, targetID)
 	res, err := tx.Exec(`DELETE FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, targetID)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
@@ -421,6 +514,9 @@ func (h *Handler) removeMember(c *gin.Context) {
 	h.publishRoomDeleted(roomID, targetID)
 	if !pruned {
 		h.publishRoomUpdated(roomID)
+		if n, _ := liveRes.RowsAffected(); n > 0 {
+			h.PublishLiveSnapshot(roomID, "live_participant_left", map[string]any{"user_id": targetID})
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -428,8 +524,8 @@ func (h *Handler) removeMember(c *gin.Context) {
 func (h *Handler) updateMemberRole(c *gin.Context) {
 	roomID := c.Param("room_id")
 	actorID := currentUserID(c)
-	if !h.isAdmin(roomID, actorID) {
-		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
+	if !h.canManageRoomRoles(roomID, actorID) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "owner required")
 		return
 	}
 	var req roleRequest
@@ -476,6 +572,60 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 	// permissions UI reflects the change without a manual refetch.
 	h.publishRoomRole(roomID, targetID)
 	c.JSON(http.StatusOK, gin.H{"member": h.memberPayload(roomID, targetID)})
+}
+
+func (h *Handler) transferRoomCreator(c *gin.Context) {
+	roomID := c.Param("room_id")
+	actorID := currentUserID(c)
+	if !h.canManageRoomRoles(roomID, actorID) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "owner required")
+		return
+	}
+	var req userIDRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "user_id is required")
+		return
+	}
+	targetID := strings.TrimSpace(req.UserID)
+	if h.isSuperuser(targetID) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "super user cannot become room creator")
+		return
+	}
+	var targetRole string
+	if err := h.DB.QueryRow(`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, targetID).Scan(&targetRole); err != nil {
+		h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
+		return
+	}
+	tx, err := h.DB.Begin()
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+		return
+	}
+	defer tx.Rollback()
+	_, _ = tx.Exec(`UPDATE room_memberships SET role = 'admin' WHERE room_id = ? AND role = 'owner' AND user_id != ?`, roomID, targetID)
+	if _, err := tx.Exec(`UPDATE room_memberships SET role = 'owner' WHERE room_id = ? AND user_id = ?`, roomID, targetID); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+		return
+	}
+	if _, err := tx.Exec(`UPDATE rooms SET created_by_user_id = ?, updated_at = ? WHERE id = ?`, targetID, nowMillis(), roomID); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save creator transfer failed")
+		return
+	}
+	h.publishRoomRole(roomID, targetID)
+	if actorID != targetID {
+		h.publishRoomRole(roomID, actorID)
+	}
+	h.publishRoomUpdated(roomID)
+	detail, err := h.buildRoomDetail(roomID, actorID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"room": detail})
 }
 
 func (h *Handler) textMuteMember(c *gin.Context) {
@@ -581,19 +731,39 @@ func (h *Handler) reviewJoinRequest(c *gin.Context) {
 	newStatus := "rejected"
 	if req.Decision == "approve" {
 		newStatus = "approved"
-		_, _ = h.DB.Exec(
-			`INSERT INTO room_memberships (room_id, user_id, role, joined_at)
-			 VALUES (?, ?, 'member', ?)
-			 ON CONFLICT(room_id, user_id) DO NOTHING`,
-			roomID, userID, nowMillis(),
-		)
+		if !h.isSuperuser(userID) {
+			tx, err := h.DB.Begin()
+			if err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
+				return
+			}
+			defer tx.Rollback()
+			now := nowMillis()
+			if _, err := h.addRoomMemberTx(tx, roomID, userID, now); err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
+				return
+			}
+			if _, err := tx.Exec(`UPDATE join_requests SET status = ?, updated_at = ? WHERE id = ?`, newStatus, now, c.Param("request_id")); err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
+				return
+			}
+			if err := tx.Commit(); err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
+				return
+			}
+		} else {
+			_, _ = h.DB.Exec(`UPDATE join_requests SET status = ?, updated_at = ? WHERE id = ?`, newStatus, nowMillis(), c.Param("request_id"))
+		}
+	} else {
+		_, _ = h.DB.Exec(`UPDATE join_requests SET status = ?, updated_at = ? WHERE id = ?`, newStatus, nowMillis(), c.Param("request_id"))
 	}
-	_, _ = h.DB.Exec(`UPDATE join_requests SET status = ?, updated_at = ? WHERE id = ?`, newStatus, nowMillis(), c.Param("request_id"))
 	if newStatus == "approved" {
 		// The applicant's existing SSE connection isn't subscribed to this room
 		// (they weren't a member when it connected), so room_added reaches them
 		// by userID. Existing members get the bumped member_count.
-		h.publishRoomToUser(userID, roomID, "room_added")
+		if !h.isSuperuser(userID) {
+			h.publishRoomToUser(userID, roomID, "room_added")
+		}
 		h.publishRoomUpdated(roomID, userID)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -612,13 +782,22 @@ func (h *Handler) deleteRoom(c *gin.Context) {
 		return
 	}
 	var req struct {
-		ConfirmRID string `json:"confirm_rid"`
+		ConfirmRID  string `json:"confirm_rid"`
+		ConfirmName string `json:"confirm_name"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	var rid string
-	_ = h.DB.QueryRow(`SELECT rid FROM rooms WHERE id = ?`, roomID).Scan(&rid)
+	var rid, name string
+	_ = h.DB.QueryRow(`SELECT rid, name FROM rooms WHERE id = ?`, roomID).Scan(&rid, &name)
+	if req.ConfirmRID == "" && req.ConfirmName == "" {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "confirm_name or confirm_rid is required")
+		return
+	}
 	if req.ConfirmRID != "" && req.ConfirmRID != rid {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "confirm_rid mismatch")
+		return
+	}
+	if req.ConfirmName != "" && req.ConfirmName != name {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "confirm_name mismatch")
 		return
 	}
 	// Capture the audience before the row is gone — afterwards there's no
@@ -630,7 +809,7 @@ func (h *Handler) deleteRoom(c *gin.Context) {
 }
 
 func (h *Handler) roomSettingsPayload(roomID string) gin.H {
-	var rid, name, defaultAvatar, visibility, joinPolicy, recallPolicy string
+	var rid, name, defaultAvatar, visibility, joinPolicy, recallPolicy, description string
 	var avatarAssetID, avatarURL sql.NullString
 	var ai int
 	var recallWindow sql.NullInt64
@@ -638,15 +817,17 @@ func (h *Handler) roomSettingsPayload(roomID string) gin.H {
 	_ = h.DB.QueryRow(
 		`SELECT rid, name, avatar_asset_id, avatar_url, default_avatar_key, visibility, join_policy,
 		        ai_voice_announce_enabled, message_recall_policy, message_recall_window_seconds,
-		        created_at, updated_at
+		        description, created_at, updated_at
 		 FROM rooms WHERE id = ?`,
 		roomID,
-	).Scan(&rid, &name, &avatarAssetID, &avatarURL, &defaultAvatar, &visibility, &joinPolicy, &ai, &recallPolicy, &recallWindow, &createdAt, &updatedAt)
+	).Scan(&rid, &name, &avatarAssetID, &avatarURL, &defaultAvatar, &visibility, &joinPolicy, &ai, &recallPolicy, &recallWindow, &description, &createdAt, &updatedAt)
 	return gin.H{
 		"id": roomID, "rid": rid, "name": name, "avatar_asset_id": nullableString(avatarAssetID),
 		"avatar_url": nullableString(avatarURL), "default_avatar_key": defaultAvatar,
-		"visibility": visibility, "join_policy": joinPolicy, "ai_voice_announce_enabled": ai != 0,
-		"message_recall_policy": recallPolicy, "message_recall_window_seconds": nullableInt64(recallWindow),
+		"description": description,
+		"visibility":  visibility, "join_policy": joinPolicy, "ai_voice_announce_enabled": ai != 0,
+		"ai_voice_announcements_enabled": ai != 0,
+		"message_recall_policy":          recallPolicy, "message_recall_window_seconds": nullableInt64(recallWindow),
 		"created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
 	}
 }
@@ -663,6 +844,7 @@ func (h *Handler) myRoomSettingsPayload(roomID, userID string) gin.H {
 		"remark_name": nullableString(remark), "room_display_name": nullableString(display),
 		"room_avatar_asset_id": nil, "room_avatar_url": nullableString(avatarURL),
 		"room_default_avatar_key": nullableString(defaultAvatar), "notification_level": notification,
+		"notification_policy": notification,
 	}
 }
 
@@ -764,4 +946,19 @@ func emptyToNil(value string) any {
 		return nil
 	}
 	return value
+}
+
+func (h *Handler) currentRoomAvatarKey(roomID string) string {
+	var key string
+	_ = h.DB.QueryRow(`SELECT default_avatar_key FROM rooms WHERE id = ?`, roomID).Scan(&key)
+	return key
+}
+
+func (h *Handler) currentRoomProfileAvatarKey(roomID, userID string) string {
+	var key sql.NullString
+	_ = h.DB.QueryRow(`SELECT room_default_avatar_key FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&key)
+	if key.Valid {
+		return key.String
+	}
+	return ""
 }

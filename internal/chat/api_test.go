@@ -431,8 +431,15 @@ func TestSuperuserCanSeeAndJoinPrivateRooms(t *testing.T) {
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", super.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	joined := response["room"].(map[string]any)["my_membership"].(map[string]any)
-	if joined["role"] != "admin" {
-		t.Fatalf("superuser should join closed room as admin: %v", joined)
+	if joined["role"] != "superuser" {
+		t.Fatalf("superuser should keep an effective temporary room role: %v", joined)
+	}
+	var superMemberships int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, super.User["id"].(string)).Scan(&superMemberships); err != nil {
+		t.Fatalf("count superuser memberships: %v", err)
+	}
+	if superMemberships != 0 {
+		t.Fatalf("superuser should not be persisted as a room member, got %d rows", superMemberships)
 	}
 
 	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+super.User["id"].(string), owner.Token, nil)
@@ -459,14 +466,14 @@ func TestRoomLeaveDeletesAndPromotesAdmin(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 	aliceMember := memberByUserID(t, response, alice.User["id"].(string))
 	bobMember := memberByUserID(t, response, bob.User["id"].(string))
-	adminCount := 0
+	ownerCount := 0
 	for _, member := range []map[string]any{aliceMember, bobMember} {
-		if member["role"] == "admin" {
-			adminCount++
+		if member["role"] == "owner" {
+			ownerCount++
 		}
 	}
-	if adminCount != 1 {
-		t.Fatalf("exactly one remaining member should be promoted to admin: %v", response)
+	if ownerCount != 1 {
+		t.Fatalf("exactly one remaining member should be promoted to owner: %v", response)
 	}
 
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", owner.Token, nil)
@@ -486,6 +493,169 @@ func TestRoomLeaveDeletesAndPromotesAdmin(t *testing.T) {
 	}
 	if exists != 0 {
 		t.Fatalf("room should be deleted after last member leaves")
+	}
+}
+
+func TestRoomInfoManagementEndpoints(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("manage_owner")
+	member := api.register("manage_member")
+
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Manage Me",
+		"description": "old intro",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID, owner.Token, map[string]any{
+		"name":                           "Managed",
+		"description":                    "Room bio",
+		"visibility":                     "private",
+		"join_policy":                    "closed",
+		"ai_voice_announcements_enabled": false,
+		"default_avatar_key":             "green-2",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	managed := response["room"].(map[string]any)
+	if managed["name"] != "Managed" || managed["description"] != "Room bio" || managed["visibility"] != "private" || managed["join_policy"] != "closed" {
+		t.Fatalf("room management response missing updated fields: %v", managed)
+	}
+	if managed["ai_voice_announcements_enabled"] != false || managed["default_avatar_key"] != "green-2" {
+		t.Fatalf("room management response missing voice/avatar fields: %v", managed)
+	}
+	createdBy := managed["created_by"].(map[string]any)
+	if createdBy["id"] != owner.User["id"] {
+		t.Fatalf("room creator should be owner before transfer: %v", managed)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/me", member.Token, map[string]any{
+		"remark_name":         "My Managed Room",
+		"room_display_name":   "Local Nick",
+		"default_avatar_key":  "red-4",
+		"notification_policy": "mentions",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	personalRoom := response["room"].(map[string]any)
+	profile := personalRoom["personal_profile"].(map[string]any)
+	if personalRoom["remark_name"] != "My Managed Room" || personalRoom["notification_policy"] != "mentions" {
+		t.Fatalf("room personal fields not returned on detail: %v", personalRoom)
+	}
+	if profile["display_name"] != "Local Nick" || profile["default_avatar_key"] != "red-4" {
+		t.Fatalf("room personal profile not returned: %v", profile)
+	}
+	settings := response["settings"].(map[string]any)
+	if settings["notification_policy"] != "mentions" {
+		t.Fatalf("settings should expose notification_policy alias: %v", settings)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+member.User["id"].(string), member.Token, map[string]any{"role": "admin"})
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+member.User["id"].(string), owner.Token, map[string]any{"role": "admin"})
+	api.requireStatus(status, http.StatusOK, response)
+	if response["member"].(map[string]any)["role"] != "admin" {
+		t.Fatalf("owner should grant admin role: %v", response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/creator", owner.Token, map[string]any{
+		"user_id": member.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	transferred := response["room"].(map[string]any)
+	if transferred["created_by"].(map[string]any)["id"] != member.User["id"] {
+		t.Fatalf("creator transfer should update room creator: %v", transferred)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if memberByUserID(t, response, member.User["id"].(string))["role"] != "owner" {
+		t.Fatalf("target member should become owner: %v", response)
+	}
+	if memberByUserID(t, response, owner.User["id"].(string))["role"] != "admin" {
+		t.Fatalf("previous owner should become admin: %v", response)
+	}
+
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/me", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID, owner.Token, nil)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID, member.Token, map[string]any{"confirm_name": "Managed"})
+	api.requireStatus(status, http.StatusOK, response)
+	var exists int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM rooms WHERE id = ?`, roomID).Scan(&exists); err != nil {
+		t.Fatalf("count deleted room: %v", err)
+	}
+	if exists != 0 {
+		t.Fatalf("room should be deleted after confirmed creator deletion")
+	}
+}
+
+func TestSuperuserCreatedRoomFirstJoinerBecomesOwner(t *testing.T) {
+	api := newAPIHarness(t)
+	super := api.login("GANG", "64n9-Ch47")
+	joiner := api.register("seed_joiner")
+	reviewed := api.register("seed_reviewed")
+	invited := api.register("seed_invited")
+
+	room := api.createRoom(super.Token, map[string]any{
+		"name":        "Ghost Seed",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	if room["created_by"] != nil {
+		t.Fatalf("superuser-created room should not expose a creator before first normal member joins: %v", room)
+	}
+	if room["my_membership"].(map[string]any)["role"] != "superuser" || int(room["member_count"].(float64)) != 0 {
+		t.Fatalf("superuser-created room should return temporary role and no members: %v", room)
+	}
+	var superMemberships int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, super.User["id"].(string)).Scan(&superMemberships); err != nil {
+		t.Fatalf("count superuser memberships: %v", err)
+	}
+	if superMemberships != 0 {
+		t.Fatalf("superuser should not be inserted as room member")
+	}
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", joiner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	joinedRoom := response["room"].(map[string]any)
+	if joinedRoom["my_membership"].(map[string]any)["role"] != "owner" {
+		t.Fatalf("first normal joiner should become owner: %v", joinedRoom)
+	}
+	if joinedRoom["created_by"].(map[string]any)["id"] != joiner.User["id"] {
+		t.Fatalf("first normal joiner should become visible creator: %v", joinedRoom)
+	}
+
+	reviewRoom := api.createRoom(super.Token, map[string]any{"name": "Review Seed"})
+	reviewRoomID := reviewRoom["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+reviewRoomID+"/join", reviewed.Token, nil)
+	api.requireStatus(status, http.StatusAccepted, response)
+	requestID := response["join_request"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/rooms/"+reviewRoomID+"/join-requests/"+requestID, super.Token, map[string]any{"decision": "approve"})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms/"+reviewRoomID, reviewed.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	reviewedRoom := response["room"].(map[string]any)
+	if reviewedRoom["my_membership"].(map[string]any)["role"] != "owner" || reviewedRoom["created_by"].(map[string]any)["id"] != reviewed.User["id"] {
+		t.Fatalf("approved first normal joiner should become owner: %v", reviewedRoom)
+	}
+
+	inviteRoom := api.createRoom(super.Token, map[string]any{"name": "Invite Seed", "join_policy": "closed"})
+	inviteRoomID := inviteRoom["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+inviteRoomID+"/invites", super.Token, map[string]any{
+		"user_id": invited.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	inviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+inviteID, invited.Token, map[string]any{"decision": "accept"})
+	api.requireStatus(status, http.StatusOK, response)
+	invitedRoom := response["room"].(map[string]any)
+	if invitedRoom["my_membership"].(map[string]any)["role"] != "owner" || invitedRoom["created_by"].(map[string]any)["id"] != invited.User["id"] {
+		t.Fatalf("invited first normal member should become owner: %v", invitedRoom)
 	}
 }
 

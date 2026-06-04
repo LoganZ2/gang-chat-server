@@ -34,22 +34,24 @@ import (
 // roomSnapshot is the shared, user-agnostic view of a room pushed over SSE.
 // It mirrors roomCard minus the per-viewer fields.
 type roomSnapshot struct {
-	ID                         string              `json:"id"`
-	RID                        string              `json:"rid,omitempty"`
-	Name                       string              `json:"name"`
-	AvatarURL                  *string             `json:"avatar_url"`
-	DefaultAvatarKey           string              `json:"default_avatar_key"`
-	Visibility                 string              `json:"visibility,omitempty"`
-	JoinPolicy                 string              `json:"join_policy,omitempty"`
-	AIVoiceAnnounceEnabled     bool                `json:"ai_voice_announce_enabled"`
-	MessageRecallPolicy        string              `json:"message_recall_policy,omitempty"`
-	MessageRecallWindowSeconds *int64              `json:"message_recall_window_seconds"`
-	MemberCount                int                 `json:"member_count"`
-	LiveParticipantCount       int                 `json:"live_participant_count"`
-	LiveAvatarPreview          []userSummary       `json:"live_avatar_preview"`
-	LastMessage                *lastMessagePreview `json:"last_message"`
-	CreatedAt                  string              `json:"created_at"`
-	UpdatedAt                  string              `json:"updated_at"`
+	ID                          string              `json:"id"`
+	RID                         string              `json:"rid,omitempty"`
+	Name                        string              `json:"name"`
+	Description                 string              `json:"description"`
+	AvatarURL                   *string             `json:"avatar_url"`
+	DefaultAvatarKey            string              `json:"default_avatar_key"`
+	Visibility                  string              `json:"visibility,omitempty"`
+	JoinPolicy                  string              `json:"join_policy,omitempty"`
+	AIVoiceAnnounceEnabled      bool                `json:"ai_voice_announce_enabled"`
+	AIVoiceAnnouncementsEnabled bool                `json:"ai_voice_announcements_enabled"`
+	MessageRecallPolicy         string              `json:"message_recall_policy,omitempty"`
+	MessageRecallWindowSeconds  *int64              `json:"message_recall_window_seconds"`
+	MemberCount                 int                 `json:"member_count"`
+	LiveParticipantCount        int                 `json:"live_participant_count"`
+	LiveAvatarPreview           []userSummary       `json:"live_avatar_preview"`
+	LastMessage                 *lastMessagePreview `json:"last_message"`
+	CreatedAt                   string              `json:"created_at"`
+	UpdatedAt                   string              `json:"updated_at"`
 }
 
 // buildRoomSnapshot rebuilds the full public snapshot for roomID from the DB.
@@ -59,13 +61,13 @@ func (h *Handler) buildRoomSnapshot(roomID string) (roomSnapshot, error) {
 		`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 		        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
 		        r.message_recall_policy, r.message_recall_window_seconds,
-		        r.created_at, r.updated_at
+		        r.description, r.created_at, r.updated_at
 		 FROM rooms r WHERE r.id = ?`,
 		roomID,
 	).Scan(
 		&rec.ID, &rec.RID, &rec.Name, &rec.AvatarURL, &rec.DefaultAvatarKey, &rec.CreatedByUserID,
 		&rec.Visibility, &rec.JoinPolicy, &rec.AIVoiceAnnounceEnabled, &rec.MessageRecallPolicy,
-		&rec.MessageRecallWindowSeconds, &rec.CreatedAt, &rec.UpdatedAt,
+		&rec.MessageRecallWindowSeconds, &rec.Description, &rec.CreatedAt, &rec.UpdatedAt,
 	)
 	if err != nil {
 		return roomSnapshot{}, err
@@ -85,22 +87,24 @@ func (h *Handler) buildRoomSnapshot(roomID string) (roomSnapshot, error) {
 	}
 
 	return roomSnapshot{
-		ID:                         rec.ID,
-		RID:                        rec.RID.String,
-		Name:                       rec.Name,
-		AvatarURL:                  nullableString(rec.AvatarURL),
-		DefaultAvatarKey:           rec.DefaultAvatarKey,
-		Visibility:                 rec.Visibility,
-		JoinPolicy:                 rec.JoinPolicy,
-		AIVoiceAnnounceEnabled:     rec.AIVoiceAnnounceEnabled != 0,
-		MessageRecallPolicy:        rec.MessageRecallPolicy,
-		MessageRecallWindowSeconds: nullableInt64(rec.MessageRecallWindowSeconds),
-		MemberCount:                memberCount,
-		LiveParticipantCount:       liveCount,
-		LiveAvatarPreview:          livePreview,
-		LastMessage:                lastMessage,
-		CreatedAt:                  formatMillis(rec.CreatedAt),
-		UpdatedAt:                  formatMillis(rec.UpdatedAt),
+		ID:                          rec.ID,
+		RID:                         rec.RID.String,
+		Name:                        rec.Name,
+		Description:                 rec.Description,
+		AvatarURL:                   nullableString(rec.AvatarURL),
+		DefaultAvatarKey:            rec.DefaultAvatarKey,
+		Visibility:                  rec.Visibility,
+		JoinPolicy:                  rec.JoinPolicy,
+		AIVoiceAnnounceEnabled:      rec.AIVoiceAnnounceEnabled != 0,
+		AIVoiceAnnouncementsEnabled: rec.AIVoiceAnnounceEnabled != 0,
+		MessageRecallPolicy:         rec.MessageRecallPolicy,
+		MessageRecallWindowSeconds:  nullableInt64(rec.MessageRecallWindowSeconds),
+		MemberCount:                 memberCount,
+		LiveParticipantCount:        liveCount,
+		LiveAvatarPreview:           livePreview,
+		LastMessage:                 lastMessage,
+		CreatedAt:                   formatMillis(rec.CreatedAt),
+		UpdatedAt:                   formatMillis(rec.UpdatedAt),
 	}, nil
 }
 
