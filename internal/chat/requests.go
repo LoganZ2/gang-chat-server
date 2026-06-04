@@ -1,20 +1,26 @@
 package chat
 
 type roomSettingsRequest struct {
-	Name                       *string `json:"name"`
-	AvatarAssetID              *string `json:"avatar_asset_id"`
-	Visibility                 *string `json:"visibility"`
-	JoinPolicy                 *string `json:"join_policy"`
-	AIVoiceAnnounceEnabled     *bool   `json:"ai_voice_announce_enabled"`
-	MessageRecallPolicy        *string `json:"message_recall_policy"`
-	MessageRecallWindowSeconds *int64  `json:"message_recall_window_seconds"`
+	Name                        *string `json:"name"`
+	Description                 *string `json:"description"`
+	AvatarAssetID               *string `json:"avatar_asset_id"`
+	DefaultAvatarKey            *string `json:"default_avatar_key"`
+	Visibility                  *string `json:"visibility"`
+	JoinPolicy                  *string `json:"join_policy"`
+	AIVoiceAnnounceEnabled      *bool   `json:"ai_voice_announce_enabled"`
+	AIVoiceAnnouncementsEnabled *bool   `json:"ai_voice_announcements_enabled"`
+	MessageRecallPolicy         *string `json:"message_recall_policy"`
+	MessageRecallWindowSeconds  *int64  `json:"message_recall_window_seconds"`
 }
 
 type myRoomSettingsRequest struct {
-	RemarkName        *string `json:"remark_name"`
-	RoomDisplayName   *string `json:"room_display_name"`
-	RoomAvatarAssetID *string `json:"room_avatar_asset_id"`
-	NotificationLevel *string `json:"notification_level"`
+	RemarkName         *string `json:"remark_name"`
+	RoomDisplayName    *string `json:"room_display_name"`
+	RoomAvatarAssetID  *string `json:"room_avatar_asset_id"`
+	AvatarAssetID      *string `json:"avatar_asset_id"`
+	DefaultAvatarKey   *string `json:"default_avatar_key"`
+	NotificationLevel  *string `json:"notification_level"`
+	NotificationPolicy *string `json:"notification_policy"`
 }
 
 type userIDRequest struct {

@@ -96,22 +96,31 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "room is not accepting joins")
 		return
 	}
-	if alreadyMember != 0 && isSuperuser {
-		_, _ = h.DB.Exec(`UPDATE room_memberships SET role = 'admin' WHERE room_id = ? AND user_id = ? AND role != 'owner'`, roomID, userID)
+	if isSuperuser {
+		detail, err := h.buildRoomDetail(roomID, userID)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
+			return
+		}
+		if h.Bus != nil {
+			h.Bus.AddUserRoomInterest(userID, roomID)
+		}
+		c.JSON(http.StatusOK, gin.H{"room": detail})
+		return
 	}
 
-	role := "member"
-	if isSuperuser {
-		role = "admin"
-	}
-	_, err := h.DB.Exec(
-		`INSERT INTO room_memberships (room_id, user_id, role, joined_at)
-		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT(room_id, user_id) DO NOTHING`,
-		roomID, userID, role, nowMillis(),
-	)
+	tx, err := h.DB.Begin()
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join room")
+		return
+	}
+	defer tx.Rollback()
+	if _, err := h.addRoomMemberTx(tx, roomID, userID, nowMillis()); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join room")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room membership")
 		return
 	}
 
@@ -131,7 +140,23 @@ func (h *Handler) joinRoom(c *gin.Context) {
 func (h *Handler) leaveRoom(c *gin.Context) {
 	roomID := c.Param("room_id")
 	userID := currentUserID(c)
-	if !h.requireMember(c, roomID) {
+	if !h.isRoomMember(roomID, userID) {
+		if h.isSuperuser(userID) && h.roomIDExists(roomID) {
+			if !h.bindOptionalJSON(c, nil) {
+				return
+			}
+			res, err := h.DB.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID)
+			if err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to leave room")
+				return
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				h.PublishLiveSnapshot(roomID, "live_participant_left", map[string]any{"user_id": userID})
+			}
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+			return
+		}
+		h.jsonError(c, http.StatusNotFound, "not_found", "room not found")
 		return
 	}
 	if !h.bindOptionalJSON(c, nil) {
@@ -145,7 +170,7 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	_, _ = tx.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID)
+	liveRes, _ := tx.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID)
 	_, err = tx.Exec(`DELETE FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to leave room")
@@ -167,8 +192,41 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 	h.publishRoomDeleted(roomID, userID)
 	if !pruned {
 		h.publishRoomUpdated(roomID)
+		if n, _ := liveRes.RowsAffected(); n > 0 {
+			h.PublishLiveSnapshot(roomID, "live_participant_left", map[string]any{"user_id": userID})
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) addRoomMemberTx(tx *sql.Tx, roomID, userID string, joinedAt int64) (string, error) {
+	role := "member"
+	var ownerCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND role = 'owner'`, roomID).Scan(&ownerCount); err != nil {
+		return "", err
+	}
+	if ownerCount == 0 {
+		role = "owner"
+	}
+	res, err := tx.Exec(
+		`INSERT INTO room_memberships (room_id, user_id, role, joined_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(room_id, user_id) DO NOTHING`,
+		roomID, userID, role, joinedAt,
+	)
+	if err != nil {
+		return "", err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		_ = tx.QueryRow(`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&role)
+		return role, nil
+	}
+	if role == "owner" {
+		if _, err := tx.Exec(`UPDATE rooms SET created_by_user_id = ?, updated_at = ? WHERE id = ?`, userID, joinedAt, roomID); err != nil {
+			return "", err
+		}
+	}
+	return role, nil
 }
 
 func (h *Handler) pruneOrRepairRoomTx(tx *sql.Tx, roomID string) (bool, error) {
@@ -181,26 +239,35 @@ func (h *Handler) pruneOrRepairRoomTx(tx *sql.Tx, roomID string) (bool, error) {
 		return true, err
 	}
 
-	var adminCount int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND role IN ('owner', 'admin')`, roomID).Scan(&adminCount); err != nil {
+	var ownerCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND role = 'owner'`, roomID).Scan(&ownerCount); err != nil {
 		return false, err
 	}
-	if adminCount > 0 {
+	if ownerCount > 0 {
 		return false, nil
 	}
 
+	var nextOwner string
+	if err := tx.QueryRow(
+		`SELECT rm.user_id
+		 FROM room_memberships rm
+		 LEFT JOIN live_participants lp ON lp.room_id = rm.room_id AND lp.user_id = rm.user_id
+		 WHERE rm.room_id = ?
+		 ORDER BY
+		   CASE WHEN rm.role = 'admin' THEN 0 ELSE 1 END,
+		   CASE WHEN lp.user_id IS NOT NULL THEN 0 ELSE 1 END,
+		   RANDOM()
+		 LIMIT 1`,
+		roomID,
+	).Scan(&nextOwner); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`UPDATE room_memberships SET role = 'owner' WHERE room_id = ? AND user_id = ?`, roomID, nextOwner); err != nil {
+		return false, err
+	}
 	_, err := tx.Exec(
-		`UPDATE room_memberships
-		 SET role = 'admin'
-		 WHERE room_id = ?
-		   AND user_id = (
-		     SELECT user_id
-		     FROM room_memberships
-		     WHERE room_id = ? AND role = 'member'
-		     ORDER BY RANDOM()
-		     LIMIT 1
-		   )`,
-		roomID, roomID,
+		`UPDATE rooms SET created_by_user_id = ?, updated_at = ? WHERE id = ?`,
+		nextOwner, nowMillis(), roomID,
 	)
 	return false, err
 }

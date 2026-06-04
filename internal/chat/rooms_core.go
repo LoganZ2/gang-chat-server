@@ -22,7 +22,7 @@ func (h *Handler) listRooms(c *gin.Context) {
 			`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 			        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
 			        r.message_recall_policy, r.message_recall_window_seconds,
-			        r.created_at, r.updated_at
+			        r.description, r.created_at, r.updated_at
 			 FROM rooms r
 			 ORDER BY (
 			   SELECT COUNT(*) FROM live_participants lp WHERE lp.room_id = r.id
@@ -35,7 +35,7 @@ func (h *Handler) listRooms(c *gin.Context) {
 			`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 			        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
 			        r.message_recall_policy, r.message_recall_window_seconds,
-			        r.created_at, r.updated_at
+			        r.description, r.created_at, r.updated_at
 			 FROM rooms r
 			 JOIN room_memberships rm ON rm.room_id = r.id
 			 WHERE rm.user_id = ?
@@ -106,6 +106,26 @@ func (h *Handler) createRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid join_policy")
 		return
 	}
+	description := strings.TrimSpace(req.Description)
+	if utf8.RuneCountInString(description) > 500 {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "description must be at most 500 characters")
+		return
+	}
+	defaultAvatarKey := defaultRoomAvatar(roomID)
+	if req.DefaultAvatarKey != nil && strings.TrimSpace(*req.DefaultAvatarKey) != "" {
+		defaultAvatarKey = strings.TrimSpace(*req.DefaultAvatarKey)
+	}
+	var avatarAssetID any
+	var avatarURL any
+	if req.AvatarAssetID != nil && strings.TrimSpace(*req.AvatarAssetID) != "" {
+		var url string
+		if err := h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, strings.TrimSpace(*req.AvatarAssetID), userID).Scan(&url); err != nil {
+			h.jsonError(c, http.StatusBadRequest, "validation_failed", "avatar asset not found")
+			return
+		}
+		avatarAssetID = strings.TrimSpace(*req.AvatarAssetID)
+		avatarURL = url
+	}
 
 	tx, err := h.DB.Begin()
 	if err != nil {
@@ -116,23 +136,25 @@ func (h *Handler) createRoom(c *gin.Context) {
 
 	_, err = tx.Exec(
 		`INSERT INTO rooms (
-		   id, rid, name, avatar_url, default_avatar_key, created_by_user_id,
+		   id, rid, name, avatar_asset_id, avatar_url, default_avatar_key, created_by_user_id,
 		   visibility, join_policy, ai_voice_announce_enabled, message_recall_policy,
-		   message_recall_window_seconds, created_at, updated_at
-		 ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 1, 'time_limited', 120, ?, ?)`,
-		roomID, rid, name, defaultRoomAvatar(roomID), userID, visibility, joinPolicy, now, now,
+		   message_recall_window_seconds, description, created_at, updated_at
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'time_limited', 120, ?, ?, ?)`,
+		roomID, rid, name, avatarAssetID, avatarURL, defaultAvatarKey, userID, visibility, joinPolicy, description, now, now,
 	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to create room")
 		return
 	}
-	_, err = tx.Exec(
-		`INSERT INTO room_memberships (room_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)`,
-		roomID, userID, now,
-	)
-	if err != nil {
-		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join room")
-		return
+	if !h.isSuperuser(userID) {
+		_, err = tx.Exec(
+			`INSERT INTO room_memberships (room_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)`,
+			roomID, userID, now,
+		)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join room")
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room")
@@ -144,8 +166,6 @@ func (h *Handler) createRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
 		return
 	}
-	// The creator is the only member, so a single room_added (covering all of
-	// their other devices) is the whole fan-out.
 	h.publishRoomToUser(userID, roomID, "room_added")
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"room": detail})
 }
@@ -168,7 +188,7 @@ func (h *Handler) searchRooms(c *gin.Context) {
 		`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 		        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
 		        r.message_recall_policy, r.message_recall_window_seconds,
-		        r.created_at, r.updated_at,
+		        r.description, r.created_at, r.updated_at,
 		        CASE WHEN rm.user_id IS NULL THEN 0 ELSE 1 END AS joined
 		 FROM rooms r
 		 LEFT JOIN room_memberships rm ON rm.room_id = r.id AND rm.user_id = ?
@@ -260,11 +280,15 @@ func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error)
 		RID:                  rec.RID.String,
 		Name:                 rec.Name,
 		RemarkName:           nullableString(remarkName),
+		Description:          rec.Description,
+		Visibility:           rec.Visibility,
+		JoinPolicy:           rec.JoinPolicy,
 		AvatarURL:            nullableString(rec.AvatarURL),
 		DefaultAvatarKey:     rec.DefaultAvatarKey,
 		MemberCount:          memberCount,
 		MyRole:               role,
 		NotificationLevel:    notificationLevel,
+		NotificationPolicy:   notificationLevel,
 		LiveParticipantCount: liveCount,
 		LiveAvatarPreview:    livePreview,
 		LastMessage:          lastMessage,
@@ -282,7 +306,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 		        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
 		        r.message_recall_policy, r.message_recall_window_seconds,
-		        r.created_at, r.updated_at,
+		        r.description, r.created_at, r.updated_at,
 		        rm.role, rm.remark_name, rm.room_display_name, rm.room_avatar_url,
 		        rm.room_default_avatar_key, rm.notification_level, rm.joined_at
 		 FROM rooms r
@@ -292,7 +316,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 	).Scan(
 		&rec.ID, &rec.RID, &rec.Name, &rec.AvatarURL, &rec.DefaultAvatarKey, &rec.CreatedByUserID,
 		&rec.Visibility, &rec.JoinPolicy, &rec.AIVoiceAnnounceEnabled, &rec.MessageRecallPolicy,
-		&rec.MessageRecallWindowSeconds, &rec.CreatedAt, &rec.UpdatedAt,
+		&rec.MessageRecallWindowSeconds, &rec.Description, &rec.CreatedAt, &rec.UpdatedAt,
 		&role, &remarkName, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatarKey, &notificationLevel, &joinedAt,
 	)
 	if err != nil {
@@ -303,14 +327,14 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 			`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 			        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
 			        r.message_recall_policy, r.message_recall_window_seconds,
-			        r.created_at, r.updated_at
+			        r.description, r.created_at, r.updated_at
 			 FROM rooms r
 			 WHERE r.id = ?`,
 			roomID,
 		).Scan(
 			&rec.ID, &rec.RID, &rec.Name, &rec.AvatarURL, &rec.DefaultAvatarKey, &rec.CreatedByUserID,
 			&rec.Visibility, &rec.JoinPolicy, &rec.AIVoiceAnnounceEnabled, &rec.MessageRecallPolicy,
-			&rec.MessageRecallWindowSeconds, &rec.CreatedAt, &rec.UpdatedAt,
+			&rec.MessageRecallWindowSeconds, &rec.Description, &rec.CreatedAt, &rec.UpdatedAt,
 		)
 		if err != nil {
 			return roomDetail{}, err
@@ -320,9 +344,13 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		joinedAt = rec.CreatedAt
 	}
 
-	createdBy, err := h.userSummary(rec.CreatedByUserID)
-	if err != nil {
-		return roomDetail{}, err
+	var createdBy *userSummary
+	if rec.CreatedByUserID.Valid && !h.shouldHideRoomCreator(rec) {
+		summary, err := h.userSummary(rec.CreatedByUserID.String)
+		if err != nil {
+			return roomDetail{}, err
+		}
+		createdBy = &summary
 	}
 	memberCount, err := h.memberCount(roomID)
 	if err != nil {
@@ -334,18 +362,28 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 	}
 
 	return roomDetail{
-		ID:                         rec.ID,
-		RID:                        rec.RID.String,
-		Name:                       rec.Name,
-		AvatarURL:                  nullableString(rec.AvatarURL),
-		DefaultAvatarKey:           rec.DefaultAvatarKey,
-		Visibility:                 rec.Visibility,
-		JoinPolicy:                 rec.JoinPolicy,
-		AIVoiceAnnounceEnabled:     rec.AIVoiceAnnounceEnabled != 0,
-		MessageRecallPolicy:        rec.MessageRecallPolicy,
-		MessageRecallWindowSeconds: nullableInt64(rec.MessageRecallWindowSeconds),
-		MemberCount:                memberCount,
-		CreatedBy:                  createdBy,
+		ID:                          rec.ID,
+		RID:                         rec.RID.String,
+		Name:                        rec.Name,
+		Description:                 rec.Description,
+		AvatarURL:                   nullableString(rec.AvatarURL),
+		DefaultAvatarKey:            rec.DefaultAvatarKey,
+		Visibility:                  rec.Visibility,
+		JoinPolicy:                  rec.JoinPolicy,
+		AIVoiceAnnounceEnabled:      rec.AIVoiceAnnounceEnabled != 0,
+		AIVoiceAnnouncementsEnabled: rec.AIVoiceAnnounceEnabled != 0,
+		MessageRecallPolicy:         rec.MessageRecallPolicy,
+		MessageRecallWindowSeconds:  nullableInt64(rec.MessageRecallWindowSeconds),
+		MemberCount:                 memberCount,
+		CreatedBy:                   createdBy,
+		RemarkName:                  nullableString(remarkName),
+		NotificationPolicy:          notificationLevel,
+		PersonalProfile: roomPersonalProfile{
+			DisplayName:      nullableString(roomDisplayName),
+			AvatarURL:        nullableString(roomAvatarURL),
+			DefaultAvatarKey: nullableString(roomDefaultAvatarKey),
+		},
+		CanDeleteRoom: role == "owner" || role == "superuser" || h.isSuperuser(userID),
 		MyMembership: roomMembership{
 			Role:                 role,
 			JoinedAt:             formatMillis(joinedAt),
@@ -359,6 +397,22 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		CreatedAt: formatMillis(rec.CreatedAt),
 		UpdatedAt: formatMillis(rec.UpdatedAt),
 	}, nil
+}
+
+func (h *Handler) shouldHideRoomCreator(rec roomRecord) bool {
+	if !rec.CreatedByUserID.Valid || rec.CreatedByUserID.String == "" {
+		return true
+	}
+	if !h.isSuperuser(rec.CreatedByUserID.String) {
+		return false
+	}
+	return !h.roomHasOwner(rec.ID)
+}
+
+func (h *Handler) roomHasOwner(roomID string) bool {
+	var exists int
+	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND role = 'owner'`, roomID).Scan(&exists)
+	return exists != 0
 }
 
 func (h *Handler) memberCount(roomID string) (int, error) {

@@ -111,6 +111,15 @@ func (h *Handler) isAdmin(roomID, userID string) bool {
 	return role == "owner" || role == "admin"
 }
 
+func (h *Handler) canManageRoomRoles(roomID, userID string) bool {
+	if h.isSuperuser(userID) {
+		return h.roomIDExists(roomID)
+	}
+	var role string
+	_ = h.DB.QueryRow(`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&role)
+	return role == "owner"
+}
+
 func (h *Handler) isSuperuser(userID string) bool {
 	return model.IsSuperuser(h.DB, userID)
 }

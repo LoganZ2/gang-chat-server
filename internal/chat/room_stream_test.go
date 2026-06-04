@@ -235,7 +235,7 @@ func TestStreamDeleteRoomNotifiesMembers(t *testing.T) {
 
 	memberStream := api.connectStream(member.User["id"].(string))
 
-	status, resp = api.request(http.MethodDelete, "/rooms/"+roomID, owner.Token, nil)
+	status, resp = api.request(http.MethodDelete, "/rooms/"+roomID, owner.Token, map[string]any{"confirm_name": "Doomed"})
 	api.requireStatus(status, http.StatusOK, resp)
 
 	if got := memberStream.await("room_deleted"); got["room_id"] != roomID {
