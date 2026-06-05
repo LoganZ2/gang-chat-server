@@ -194,7 +194,7 @@ func (h *Handler) searchUsers(c *gin.Context) {
 		}
 	}
 	rows, err := h.DB.Query(
-		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key
+		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, is_superuser
 		 FROM users
 		 WHERE status = 'active'
 		   AND (
@@ -224,7 +224,8 @@ func (h *Handler) searchUsers(c *gin.Context) {
 	for rows.Next() {
 		var id, uid, username string
 		var displayName, avatarURL, defaultAvatar sql.NullString
-		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar); err != nil {
+		var isSuperuser int
+		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &isSuperuser); err != nil {
 			errorJSON(c, http.StatusInternalServerError, "internal_error", "read user failed")
 			return
 		}
@@ -233,6 +234,7 @@ func (h *Handler) searchUsers(c *gin.Context) {
 			"display_name":       nullableOr(displayName, username),
 			"avatar_url":         nullablePtrString(avatarURL),
 			"default_avatar_key": nullableOr(defaultAvatar, "blue-3"),
+			"is_superuser":       isSuperuser != 0,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"users": users, "next_cursor": nil})

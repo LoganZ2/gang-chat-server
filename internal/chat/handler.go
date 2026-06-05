@@ -36,6 +36,7 @@ type userSummary struct {
 	DefaultAvatarKey string           `json:"default_avatar_key"`
 	Bio              *string          `json:"bio,omitempty"`
 	IsSuperuser      bool             `json:"is_superuser,omitempty"`
+	IsOnline         *bool            `json:"is_online,omitempty"`
 	CommonRooms      []userCommonRoom `json:"common_rooms,omitempty"`
 }
 
@@ -289,6 +290,8 @@ func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, erro
 	summary := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
 	summary.Bio = nullableString(bio)
 	summary.IsSuperuser = isSuperuser != 0
+	isOnline := h.isUserOnline(id)
+	summary.IsOnline = &isOnline
 	if !summary.IsSuperuser {
 		rooms, err := h.userProfileRooms(id, viewerID, viewerID == id || h.isSuperuser(viewerID))
 		if err != nil {
@@ -641,6 +644,14 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func (h *Handler) isUserOnline(userID string) bool {
+	if h.Bus == nil || userID == "" {
+		return false
+	}
+	_, ok := h.Bus.OnlineUserIDs()[userID]
+	return ok
 }
 
 func allowed(value string, values ...string) bool {
