@@ -258,6 +258,29 @@ func memberByUserID(t *testing.T, response map[string]any, userID string) map[st
 	return nil
 }
 
+func hasStickerNames(pack map[string]any, names ...string) bool {
+	stickers, ok := pack["stickers"].([]any)
+	if !ok {
+		return false
+	}
+	seen := make(map[string]int, len(stickers))
+	for _, item := range stickers {
+		sticker, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := sticker["name"].(string)
+		seen[name]++
+	}
+	for _, name := range names {
+		if seen[name] == 0 {
+			return false
+		}
+		seen[name]--
+	}
+	return true
+}
+
 func participantByUserID(t *testing.T, live map[string]any, userID string) map[string]any {
 	t.Helper()
 	items, ok := live["participants"].([]any)
@@ -451,6 +474,26 @@ func TestSuperuserCanSeeAndJoinPrivateRooms(t *testing.T) {
 	api.requireStatus(status, http.StatusForbidden, response)
 }
 
+func TestUserSearchIncludesSuperuserFlag(t *testing.T) {
+	api := newAPIHarness(t)
+	super := api.login("GANG", "64n9-Ch47")
+	normal := api.register("search_normal")
+
+	status, response := api.request(http.MethodGet, "/users/search?q=GANG&limit=20", normal.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	users := response["users"].([]any)
+	if len(users) == 0 || users[0].(map[string]any)["id"] != super.User["id"] || users[0].(map[string]any)["is_superuser"] != true {
+		t.Fatalf("user search should include superuser flag: %v", response)
+	}
+
+	status, response = api.request(http.MethodGet, "/users/search?q=search_normal&limit=20", normal.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	users = response["users"].([]any)
+	if len(users) == 0 || users[0].(map[string]any)["id"] != normal.User["id"] || users[0].(map[string]any)["is_superuser"] != false {
+		t.Fatalf("user search should include normal superuser flag: %v", response)
+	}
+}
+
 func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	api := newAPIHarness(t)
 	super := api.login("GANG", "64n9-Ch47")
@@ -472,9 +515,14 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	if _, err := api.db.Exec(`UPDATE users SET bio = ? WHERE id = ?`, "Ships quietly", alice.User["id"].(string)); err != nil {
 		t.Fatalf("update alice bio: %v", err)
 	}
-	if _, err := api.db.Exec(`UPDATE room_memberships SET remark_name = ? WHERE room_id = ? AND user_id = ?`, "Shared Remark", room1ID, alice.User["id"].(string)); err != nil {
+	if _, err := api.db.Exec(
+		`UPDATE room_memberships SET remark_name = ?, room_display_name = ? WHERE room_id = ? AND user_id = ?`,
+		"Shared Remark", "Alice Shared", room1ID, alice.User["id"].(string),
+	); err != nil {
 		t.Fatalf("update room remark: %v", err)
 	}
+	aliceSub := api.bus.Subscribe(alice.User["id"].(string))
+	defer aliceSub.Close()
 
 	status, response = api.request(http.MethodGet, "/rooms/"+room1ID+"/members/"+alice.User["id"].(string)+"/profile", viewer.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
@@ -483,6 +531,9 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	if user["bio"] != "Ships quietly" {
 		t.Fatalf("profile should include signature: %v", profile)
 	}
+	if user["is_online"] != true {
+		t.Fatalf("profile should include online state: %v", profile)
+	}
 	commonRooms := user["common_rooms"].([]any)
 	if len(commonRooms) != 1 {
 		t.Fatalf("viewer should see only common rooms: %v", commonRooms)
@@ -490,6 +541,9 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	commonRoom := commonRooms[0].(map[string]any)
 	if commonRoom["id"] != room1ID || commonRoom["remark_name"] != "Shared Remark" || commonRoom["rid"] == "" {
 		t.Fatalf("common room should include id rid and remark: %v", commonRoom)
+	}
+	if commonRoom["room_display_name"] != "Alice Shared" || commonRoom["room_role"] != "member" {
+		t.Fatalf("common room should include target room identity: %v", commonRoom)
 	}
 
 	status, response = api.request(http.MethodGet, "/rooms/"+room1ID+"/members/"+alice.User["id"].(string)+"/profile", super.Token, nil)
@@ -1136,6 +1190,14 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	if personalPack["scope"] != "personal" {
 		t.Fatalf("member should save to a personal pack: %v", response)
 	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", member.Token, map[string]any{
+		"sticker_id":   sourceSticker["id"].(string),
+		"target_scope": "personal",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	if !hasStickerNames(response["pack"].(map[string]any), "ok", "ok (2)") {
+		t.Fatalf("duplicate personal saved sticker should be suffixed: %v", response)
+	}
 
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", member.Token, map[string]any{
 		"sticker_id":   sourceSticker["id"].(string),
@@ -1151,6 +1213,14 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	roomPack := response["pack"].(map[string]any)
 	if roomPack["scope"] != "room" || roomPack["room_id"] != roomID {
 		t.Fatalf("admin should save to room pack: %v", response)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", owner.Token, map[string]any{
+		"sticker_id":   sourceSticker["id"].(string),
+		"target_scope": "room",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	if !hasStickerNames(response["pack"].(map[string]any), "ok", "ok (2)") {
+		t.Fatalf("duplicate room saved sticker should be suffixed: %v", response)
 	}
 }
 
