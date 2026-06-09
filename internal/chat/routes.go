@@ -72,6 +72,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 
 	g.GET("/rooms", h.listRooms)
 	g.POST("/rooms", h.createRoom)
+	g.GET("/search", h.searchAll)
 	g.GET("/rooms/search", h.searchRooms)
 	g.GET("/room-invites", h.listRoomInvites)
 	g.PATCH("/room-invites/:invite_id", h.reviewRoomInvite)
