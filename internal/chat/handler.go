@@ -106,6 +106,19 @@ type publicRoom struct {
 	UpdatedAt            string  `json:"updated_at"`
 }
 
+type searchRoomContext struct {
+	ID               string  `json:"id"`
+	RID              string  `json:"rid,omitempty"`
+	Name             string  `json:"name"`
+	AvatarURL        *string `json:"avatar_url"`
+	DefaultAvatarKey string  `json:"default_avatar_key"`
+}
+
+type messageSearchResult struct {
+	Room    searchRoomContext `json:"room"`
+	Message message           `json:"message"`
+}
+
 type roomMembership struct {
 	Role                 string  `json:"role,omitempty"`
 	JoinedAt             string  `json:"joined_at"`

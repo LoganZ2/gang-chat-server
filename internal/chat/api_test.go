@@ -496,6 +496,80 @@ func TestSuperuserCanSeeAndJoinPrivateRooms(t *testing.T) {
 	api.requireStatus(status, http.StatusForbidden, response)
 }
 
+func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("search_all_owner")
+	member := api.register("search_all_member")
+
+	teamRoom := api.createRoom(owner.Token, map[string]any{
+		"name":        "Alpha Team",
+		"join_policy": "open",
+	})
+	teamRoomID := teamRoom["id"].(string)
+	discoveryRoom := api.createRoom(owner.Token, map[string]any{
+		"name":        "Alpha Discovery",
+		"join_policy": "open",
+	})
+	privateRoom := api.createRoom(owner.Token, map[string]any{
+		"name":       "Alpha Private",
+		"visibility": "private",
+	})
+
+	status, response := api.request(http.MethodPost, "/rooms/"+teamRoomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	api.sendMessage(owner.Token, teamRoomID, "Alpha roadmap is ready")
+	status, response = api.request(http.MethodPost, "/rooms/"+teamRoomID+"/messages", owner.Token, map[string]any{
+		"client_message_id": "search_file_" + idgen.New("client"),
+		"type":              "file",
+		"body":              "Alpha blueprint.pdf",
+		"attachments": []any{
+			map[string]any{
+				"type": "file",
+				"name": "Alpha blueprint.pdf",
+				"asset": map[string]any{
+					"id":        "asset_alpha",
+					"url":       "/assets/alpha.pdf",
+					"mime_type": "application/pdf",
+					"filename":  "Alpha blueprint.pdf",
+				},
+			},
+		},
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	api.sendMessage(owner.Token, privateRoom["id"].(string), "Alpha private note")
+
+	status, response = api.request(http.MethodGet, "/search?q=Alpha&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	myRooms := response["my_rooms"].([]any)
+	if len(myRooms) != 1 || myRooms[0].(map[string]any)["id"] != teamRoomID {
+		t.Fatalf("search should return joined matching room only in my_rooms: %v", response)
+	}
+
+	publicRooms := response["public_rooms"].([]any)
+	if len(publicRooms) != 1 || publicRooms[0].(map[string]any)["id"] != discoveryRoom["id"] {
+		t.Fatalf("search should return unjoined public matching room only in public_rooms: %v", response)
+	}
+
+	messages := response["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("search should return text message hits: %v", response)
+	}
+	messageHit := messages[0].(map[string]any)
+	if messageHit["room"].(map[string]any)["id"] != teamRoomID || !strings.Contains(messageHit["message"].(map[string]any)["body"].(string), "roadmap") {
+		t.Fatalf("search message hit should include room context and message: %v", messageHit)
+	}
+
+	files := response["files"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("search should return file hits: %v", response)
+	}
+	fileHit := files[0].(map[string]any)
+	if fileHit["room"].(map[string]any)["id"] != teamRoomID || fileHit["message"].(map[string]any)["type"] != "file" {
+		t.Fatalf("search file hit should include room context and file message: %v", fileHit)
+	}
+}
+
 func TestUserSearchIncludesSuperuserFlag(t *testing.T) {
 	api := newAPIHarness(t)
 	super := api.login("GANG", "64n9-Ch47")
