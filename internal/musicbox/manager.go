@@ -15,10 +15,6 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/gdmusic"
 )
 
-// ErrQueueFull is returned by Enqueue when adding a track would push a room's
-// transcoded audio past its byte cap.
-var ErrQueueFull = errors.New("music box queue size limit reached")
-
 // ErrUnavailable is returned when the music box can't operate (LiveKit not
 // configured). Handlers map it to 503.
 var ErrUnavailable = errors.New("music box is not available")
@@ -55,6 +51,10 @@ type Manager struct {
 
 	mu      sync.Mutex
 	players map[string]*player
+
+	// pumpMu serializes the download scheduler (pumpRoom) so two concurrent
+	// triggers can't both start a download for the same room.
+	pumpMu sync.Mutex
 }
 
 // NewManager builds a Manager. If cfg.Enabled is false every operation returns
@@ -64,7 +64,7 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 		gdmusic.WithDefaultSource(cfg.Source),
 		gdmusic.WithDefaultBitrate(cfg.SourceBitrate),
 	)
-	return &Manager{
+	m := &Manager{
 		cfg:           cfg,
 		store:         &store{db: db},
 		tc:            newTranscoder(cfg.FFmpegPath, cfg.OpusBitrate, cfg.TranscodeWorkers),
@@ -73,6 +73,12 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 		onRoomChanged: onRoomChanged,
 		players:       map[string]*player{},
 	}
+	// A previous process may have died mid-download, leaving rows stuck in
+	// 'downloading' that would otherwise block their room's scheduler forever.
+	if cfg.Enabled {
+		_, _ = m.store.resetOrphanedDownloads()
+	}
+	return m
 }
 
 // GD exposes the underlying API client for the search passthrough handler.
@@ -107,22 +113,13 @@ type EnqueueParams struct {
 	AddedByUserID string
 }
 
-// Enqueue adds a track and kicks off its download+transcode immediately. It
-// rejects the add if the room is already at (or the new track's rough size
-// would exceed) the byte cap. Because the real size isn't known until
-// transcoding finishes, we reserve a conservative estimate up front and
-// reconcile on completion.
+// Enqueue appends a track to a room's queue. The queue itself is unbounded:
+// the byte cap (MaxBytesPerRoom) only governs how many tracks are downloaded
+// and held on disk at once, not how many can be queued. A newly enqueued track
+// starts as pending and is picked up by pumpRoom once there's room on disk.
 func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, error) {
 	if !m.Enabled() {
 		return nil, ErrUnavailable
-	}
-	// Reject when the room is already over the cap (counts ready+downloading).
-	used, err := m.store.roomReadyBytes(p.RoomID)
-	if err != nil {
-		return nil, err
-	}
-	if used >= m.cfg.MaxBytesPerRoom {
-		return nil, ErrQueueFull
 	}
 
 	source := p.Source
@@ -150,8 +147,50 @@ func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, err
 		return nil, err
 	}
 	m.notify(p.RoomID)
-	go m.process(item.ID)
+	// Try to start downloading immediately; pumpRoom is a no-op if the room is
+	// already at its disk cap, in which case the track waits as pending.
+	go m.pumpRoom(p.RoomID)
 	return item, nil
+}
+
+// pumpRoom starts downloading the next pending track(s) for a room while there
+// is room under the byte cap. It downloads at most one track at a time per room
+// (a track in flight reserves no real bytes until it finishes, so we serialize
+// to keep the on-disk total predictable). An empty room (zero bytes used) is
+// always allowed to start one track, so a single track larger than the cap can
+// still play rather than being stuck forever.
+func (m *Manager) pumpRoom(roomID string) {
+	if !m.Enabled() {
+		return
+	}
+	m.pumpMu.Lock()
+	defer m.pumpMu.Unlock()
+
+	// Only one download in flight per room.
+	inflight, err := m.store.countDownloading(roomID)
+	if err != nil || inflight > 0 {
+		return
+	}
+	used, err := m.store.roomReadyBytes(roomID)
+	if err != nil {
+		return
+	}
+	// Stop pumping once at/over the cap, but always allow the first track in an
+	// empty room so an oversized single track isn't wedged.
+	if used >= m.cfg.MaxBytesPerRoom && used > 0 {
+		return
+	}
+	next, err := m.store.firstPending(roomID)
+	if err != nil || next == nil {
+		return
+	}
+	// Reserve the slot by flipping to downloading under the pump lock, so a
+	// concurrent pumpRoom sees inflight > 0 and backs off.
+	if err := m.store.setStatus(next.ID, StatusDownloading); err != nil {
+		return
+	}
+	m.notify(roomID)
+	go m.process(next.ID)
 }
 
 // process resolves the track URL, transcodes it, updates the row, and nudges
@@ -164,13 +203,13 @@ func (m *Manager) process(itemID string) {
 	if err != nil {
 		return
 	}
-	_ = m.store.setStatus(itemID, StatusDownloading)
-	m.notify(item.RoomID)
+	// Status is already 'downloading' (set by pumpRoom under its lock).
 
 	resolved, err := m.gd.TrackURL(ctx, item.Source, item.TrackID, m.cfg.SourceBitrate)
 	if err != nil {
 		_ = m.store.markFailed(itemID, "resolve url: "+err.Error())
 		m.notify(item.RoomID)
+		go m.pumpRoom(item.RoomID)
 		return
 	}
 
@@ -178,6 +217,7 @@ func (m *Manager) process(itemID string) {
 	if err := os.MkdirAll(roomDir, 0o755); err != nil {
 		_ = m.store.markFailed(itemID, "prepare dir: "+err.Error())
 		m.notify(item.RoomID)
+		go m.pumpRoom(item.RoomID)
 		return
 	}
 	dst := filepath.Join(roomDir, itemID+".ogg")
@@ -186,26 +226,24 @@ func (m *Manager) process(itemID string) {
 	if err != nil {
 		_ = m.store.markFailed(itemID, err.Error())
 		m.notify(item.RoomID)
+		go m.pumpRoom(item.RoomID)
 		return
 	}
 
-	// Enforce the cap after the real size is known: if this file pushed the
-	// room over, drop it rather than letting disk grow unbounded.
-	used, _ := m.store.roomReadyBytes(item.RoomID)
-	if used+res.SizeBytes > m.cfg.MaxBytesPerRoom {
-		_ = os.Remove(dst)
-		_ = m.store.markFailed(itemID, ErrQueueFull.Error())
-		m.notify(item.RoomID)
-		return
-	}
-
+	// No post-transcode cap check: pumpRoom already gated this download on the
+	// cap before starting it, and we allow one in-flight track to push the room
+	// up to ~cap + one track. The cap simply prevents the *next* download from
+	// starting until space frees up (a played track is removed from the queue).
 	if err := m.store.markReady(itemID, dst, res.SizeBytes, res.DurationMS); err != nil {
 		_ = os.Remove(dst)
+		go m.pumpRoom(item.RoomID)
 		return
 	}
 	m.notify(item.RoomID)
 	// A track is ready: make sure the room is playing it (no-op if already).
 	m.ensurePlaying(item.RoomID)
+	// Try the next pending track (no-op if now at the cap).
+	go m.pumpRoom(item.RoomID)
 }
 
 // Control applies a playback action to a room. Valid actions: play, pause,
@@ -296,12 +334,22 @@ func (m *Manager) ensurePlaying(roomID string) error {
 	return nil
 }
 
-// nextItem is the player's advance callback: pick the next ready track after
-// prev (or the first ready track when prev is nil).
+// nextItem is the player's advance callback. The just-finished track (prev) is
+// consumed: removed from the queue and its file deleted, which frees disk space
+// so the next pending track can start downloading. It then returns the next
+// ready track, or nil when none is ready yet (the player idles and is woken
+// when a download completes).
 func (m *Manager) nextItem(roomID string, prev *QueueItem) *QueueItem {
 	after := int64(-1)
 	if prev != nil {
 		after = prev.SortOrder
+		// Consume the finished track and reclaim its space, then let the
+		// scheduler pull in whatever was waiting on that space.
+		if removed, err := m.store.deleteItem(prev.ID); err == nil && removed != nil && removed.FilePath != "" {
+			_ = os.Remove(removed.FilePath)
+		}
+		m.notify(roomID)
+		go m.pumpRoom(roomID)
 	}
 	it, err := m.store.firstPlayable(roomID, after)
 	if err != nil {
@@ -374,6 +422,8 @@ func (m *Manager) RemoveItem(roomID, itemID string) error {
 		pl.skip()
 	}
 	m.notify(roomID)
+	// Removing a ready track frees disk space; let a pending track download.
+	go m.pumpRoom(roomID)
 	return nil
 }
 

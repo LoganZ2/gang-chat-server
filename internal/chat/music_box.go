@@ -101,10 +101,6 @@ func (h *Handler) enqueueMusicBox(c *gin.Context) {
 		DurationMS:    duration,
 		AddedByUserID: currentUserID(c),
 	})
-	if err == musicbox.ErrQueueFull {
-		h.jsonError(c, http.StatusConflict, "queue_full", "room music queue is full")
-		return
-	}
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "enqueue failed")
 		return
@@ -121,12 +117,9 @@ func (h *Handler) removeMusicBoxItem(c *gin.Context) {
 	if !h.musicBoxReady(c) {
 		return
 	}
-	// The adder or any admin may remove an item.
-	userID := currentUserID(c)
-	if !h.isAdmin(roomID, userID) && !h.musicBoxItemOwnedBy(roomID, itemID, userID) {
-		h.jsonError(c, http.StatusForbidden, "forbidden", "only the requester or an admin can remove this track")
-		return
-	}
+	// Any room member may remove a queued track, same as enqueue and playback
+	// control. Restricting removal to the adder or an admin left tracks stuck in
+	// the queue when the adder had left the room and no admin was around.
 	if err := h.MusicBox.RemoveItem(roomID, itemID); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove failed")
 		return
@@ -152,19 +145,6 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
-}
-
-// musicBoxItemOwnedBy reports whether itemID belongs to roomID and was added
-// by userID.
-func (h *Handler) musicBoxItemOwnedBy(roomID, itemID, userID string) bool {
-	var owner string
-	err := h.DB.QueryRow(
-		`SELECT added_by_user_id FROM room_music_box_queue WHERE id = ? AND room_id = ?`,
-		itemID, roomID).Scan(&owner)
-	if err != nil {
-		return false
-	}
-	return owner == userID
 }
 
 // publishMusicBoxSnapshot fans out a fresh music box state to a room's SSE

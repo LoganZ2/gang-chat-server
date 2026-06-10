@@ -156,6 +156,76 @@ func TestDeleteItemReturnsRow(t *testing.T) {
 	}
 }
 
+func TestFirstPendingOrdersAndSkipsNonPending(t *testing.T) {
+	s := newTestStore(t)
+	add(t, s, "a", 10)
+	add(t, s, "b", 20)
+	add(t, s, "c", 30)
+	// a is downloading, so the first *pending* is b.
+	if err := s.setStatus("a", StatusDownloading); err != nil {
+		t.Fatalf("setStatus: %v", err)
+	}
+	first, err := s.firstPending("r1")
+	if err != nil {
+		t.Fatalf("firstPending: %v", err)
+	}
+	if first == nil || first.ID != "b" {
+		t.Fatalf("firstPending = %v, want b", first)
+	}
+	// With everything ready/downloading, none are pending.
+	_ = s.markReady("b", "/tmp/b.ogg", 1, 0)
+	_ = s.markReady("c", "/tmp/c.ogg", 1, 0)
+	none, err := s.firstPending("r1")
+	if err != nil {
+		t.Fatalf("firstPending: %v", err)
+	}
+	if none != nil {
+		t.Fatalf("expected no pending, got %v", none)
+	}
+}
+
+func TestCountDownloading(t *testing.T) {
+	s := newTestStore(t)
+	add(t, s, "a", 10)
+	add(t, s, "b", 20)
+	if n, _ := s.countDownloading("r1"); n != 0 {
+		t.Fatalf("countDownloading = %d, want 0", n)
+	}
+	_ = s.setStatus("a", StatusDownloading)
+	if n, _ := s.countDownloading("r1"); n != 1 {
+		t.Fatalf("countDownloading = %d, want 1", n)
+	}
+	// ready no longer counts as downloading.
+	_ = s.markReady("a", "/tmp/a.ogg", 1, 0)
+	if n, _ := s.countDownloading("r1"); n != 0 {
+		t.Fatalf("countDownloading after ready = %d, want 0", n)
+	}
+}
+
+func TestResetOrphanedDownloads(t *testing.T) {
+	s := newTestStore(t)
+	add(t, s, "a", 10)
+	add(t, s, "b", 20)
+	_ = s.setStatus("a", StatusDownloading)
+	_ = s.markReady("b", "/tmp/b.ogg", 1, 0)
+
+	n, err := s.resetOrphanedDownloads()
+	if err != nil {
+		t.Fatalf("resetOrphanedDownloads: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reset count = %d, want 1", n)
+	}
+	// a is back to pending; b stays ready.
+	got, _ := s.getItem("a")
+	if got.Status != StatusPending {
+		t.Fatalf("a status = %q, want pending", got.Status)
+	}
+	if n, _ := s.countDownloading("r1"); n != 0 {
+		t.Fatalf("countDownloading after reset = %d, want 0", n)
+	}
+}
+
 func TestStateRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	st, err := s.ensureState("r1")

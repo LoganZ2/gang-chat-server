@@ -117,13 +117,43 @@ func (s *store) roomReadyBytes(roomID string) (int64, error) {
 	return total.Int64, nil
 }
 
-// countInFlight returns how many items are pending or downloading in a room.
-func (s *store) countInFlight(roomID string) (int, error) {
+// countDownloading returns how many items are mid-download in a room. The
+// scheduler keeps this at most 1 so the on-disk total stays predictable.
+func (s *store) countDownloading(roomID string) (int, error) {
 	var n int
 	err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM room_music_box_queue
-		 WHERE room_id = ? AND status IN ('pending', 'downloading')`, roomID).Scan(&n)
+		 WHERE room_id = ? AND status = 'downloading'`, roomID).Scan(&n)
 	return n, err
+}
+
+// firstPending returns the oldest pending track in a room (queue order), or
+// nil when none are waiting to download.
+func (s *store) firstPending(roomID string) (*QueueItem, error) {
+	row := s.db.QueryRow(
+		`SELECT `+itemColumns+` FROM room_music_box_queue
+		 WHERE room_id = ? AND status = 'pending'
+		 ORDER BY sort_order ASC, created_at ASC LIMIT 1`, roomID)
+	it, err := scanItem(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return it, err
+}
+
+// resetOrphanedDownloads flips any rows left in 'downloading' (e.g. by a crash
+// mid-transcode) back to 'pending' so the scheduler can retry them. Their
+// transcode never completed, so they hold no counted bytes. Returns the number
+// of rows reset.
+func (s *store) resetOrphanedDownloads() (int64, error) {
+	res, err := s.db.Exec(
+		`UPDATE room_music_box_queue SET status = 'pending', updated_at = ?
+		 WHERE status = 'downloading'`, nowMillis())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func (s *store) nextSortOrder(roomID string) (int64, error) {
