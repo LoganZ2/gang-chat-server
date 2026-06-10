@@ -45,9 +45,7 @@ type QueueItem struct {
 	TrackID       string
 	Title         string
 	Artist        string
-	Album         string
 	PicID         string
-	LyricID       string
 	DurationMS    int64
 	Status        QueueStatus
 	FilePath      string

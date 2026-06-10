@@ -19,8 +19,8 @@ func TestSearchParsesResultsAndBackfillsSource(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		// One row omits source to exercise backfill.
 		_, _ = w.Write([]byte(`[
-			{"id":"123","name":"Song A","artist":["X","Y"],"album":"Alb","pic_id":"p1","lyric_id":"l1","source":"netease"},
-			{"id":"456","name":"Song B","artist":["Z"],"album":"Alb2","pic_id":"p2","lyric_id":"l2"}
+			{"id":"123","name":"Song A","artist":["X","Y"],"pic_id":"p1","source":"netease"},
+			{"id":"456","name":"Song B","artist":["Z"],"pic_id":"p2"}
 		]`))
 	}))
 	defer srv.Close()

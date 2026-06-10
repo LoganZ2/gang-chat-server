@@ -25,17 +25,16 @@ func scanItem(row interface {
 }) (*QueueItem, error) {
 	var it QueueItem
 	var status string
-	var picID, lyricID, filePath, errMsg sql.NullString
+	var picID, filePath, errMsg sql.NullString
 	var duration sql.NullInt64
 	if err := row.Scan(
-		&it.ID, &it.RoomID, &it.Source, &it.TrackID, &it.Title, &it.Artist, &it.Album,
-		&picID, &lyricID, &duration, &status, &filePath, &it.FileSizeBytes, &errMsg,
+		&it.ID, &it.RoomID, &it.Source, &it.TrackID, &it.Title, &it.Artist,
+		&picID, &duration, &status, &filePath, &it.FileSizeBytes, &errMsg,
 		&it.AddedByUserID, &it.SortOrder, &it.CreatedAt, &it.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	it.PicID = picID.String
-	it.LyricID = lyricID.String
 	it.FilePath = filePath.String
 	it.Error = errMsg.String
 	it.DurationMS = duration.Int64
@@ -43,8 +42,8 @@ func scanItem(row interface {
 	return &it, nil
 }
 
-const itemColumns = `id, room_id, source, track_id, title, artist, album,
-	pic_id, lyric_id, duration_ms, status, file_path, file_size_bytes, error,
+const itemColumns = `id, room_id, source, track_id, title, artist,
+	pic_id, duration_ms, status, file_path, file_size_bytes, error,
 	added_by_user_id, sort_order, created_at, updated_at`
 
 // insertItem adds a new queue row in pending status and returns it.
@@ -57,12 +56,12 @@ func (s *store) insertItem(it QueueItem) (*QueueItem, error) {
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO room_music_box_queue
-		 (id, room_id, source, track_id, title, artist, album, pic_id, lyric_id,
+		 (id, room_id, source, track_id, title, artist, pic_id,
 		  duration_ms, status, file_path, file_size_bytes, error,
 		  added_by_user_id, sort_order, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, ?)`,
-		it.ID, it.RoomID, it.Source, it.TrackID, it.Title, it.Artist, it.Album,
-		ns(it.PicID), ns(it.LyricID), nullableDuration(it.DurationMS), string(it.Status),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, ?)`,
+		it.ID, it.RoomID, it.Source, it.TrackID, it.Title, it.Artist,
+		ns(it.PicID), nullableDuration(it.DurationMS), string(it.Status),
 		it.AddedByUserID, it.SortOrder, it.CreatedAt, it.UpdatedAt,
 	)
 	if err != nil {

@@ -1,6 +1,6 @@
 // Package gdmusic is a thin client for the GD Studio music platform API
-// (https://music.gdstudio.xyz). It covers the four endpoints the room music
-// box needs: search, track URL resolution, album art, and lyrics.
+// (https://music.gdstudio.xyz). It covers the endpoints the room music box
+// needs: search, track URL resolution, and album art.
 //
 // The platform is study-only and rate limited (≤50 requests / 5 minutes per
 // the published docs). We respect that with a small token-bucket limiter and
@@ -88,13 +88,11 @@ func New(opts ...Option) *Client {
 
 // SearchResult is one track from a search response.
 type SearchResult struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Artists  []string `json:"artist"`
-	Album    string   `json:"album"`
-	PicID    string   `json:"pic_id"`
-	LyricID  string   `json:"lyric_id"`
-	Source   string   `json:"source"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Artists []string `json:"artist"`
+	PicID   string   `json:"pic_id"`
+	Source  string   `json:"source"`
 }
 
 // TrackURL is the resolved playable URL for a track.
@@ -102,12 +100,6 @@ type TrackURL struct {
 	URL     string `json:"url"`
 	Bitrate int    `json:"br"`
 	SizeKB  int64  `json:"size"`
-}
-
-// Lyric holds LRC lyrics; TranslatedLyric may be empty.
-type Lyric struct {
-	Lyric           string `json:"lyric"`
-	TranslatedLyric string `json:"tlyric"`
 }
 
 // Search queries the platform. source may be empty to use the client default;
@@ -189,23 +181,6 @@ func (c *Client) AlbumArt(ctx context.Context, source, picID, size string) (stri
 		return "", err
 	}
 	return out.URL, nil
-}
-
-// Lyric fetches LRC lyrics for a lyric id.
-func (c *Client) Lyric(ctx context.Context, source, lyricID string) (*Lyric, error) {
-	if strings.TrimSpace(lyricID) == "" {
-		return nil, fmt.Errorf("gdmusic: lyric id is required")
-	}
-	q := url.Values{}
-	q.Set("types", "lyric")
-	q.Set("source", c.source(source))
-	q.Set("id", lyricID)
-
-	var out Lyric
-	if err := c.getJSON(ctx, q, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 func (c *Client) source(s string) string {

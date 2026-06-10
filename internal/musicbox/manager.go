@@ -75,7 +75,7 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 	}
 }
 
-// GD exposes the underlying API client for search/lyric passthrough handlers.
+// GD exposes the underlying API client for the search passthrough handler.
 func (m *Manager) GD() *gdmusic.Client { return m.gd }
 
 // SetOnRoomChanged installs the change callback after construction. The chat
@@ -102,9 +102,7 @@ type EnqueueParams struct {
 	TrackID       string
 	Title         string
 	Artist        string
-	Album         string
 	PicID         string
-	LyricID       string
 	DurationMS    int64
 	AddedByUserID string
 }
@@ -142,9 +140,7 @@ func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, err
 		TrackID:       p.TrackID,
 		Title:         p.Title,
 		Artist:        p.Artist,
-		Album:         p.Album,
 		PicID:         p.PicID,
-		LyricID:       p.LyricID,
 		DurationMS:    p.DurationMS,
 		Status:        StatusPending,
 		AddedByUserID: p.AddedByUserID,

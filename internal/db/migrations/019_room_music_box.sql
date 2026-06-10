@@ -12,9 +12,7 @@ CREATE TABLE IF NOT EXISTS room_music_box_queue (
     track_id         TEXT NOT NULL,
     title            TEXT NOT NULL,
     artist           TEXT NOT NULL DEFAULT '',
-    album            TEXT NOT NULL DEFAULT '',
     pic_id           TEXT,
-    lyric_id         TEXT,
     duration_ms      INTEGER,
     -- pending -> downloading -> ready, or failed
     status           TEXT NOT NULL DEFAULT 'pending',

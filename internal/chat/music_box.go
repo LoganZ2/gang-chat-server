@@ -55,9 +55,7 @@ func (h *Handler) searchMusicBox(c *gin.Context) {
 			"track_id": r.ID,
 			"name":     r.Name,
 			"artists":  r.Artists,
-			"album":    r.Album,
 			"pic_id":   r.PicID,
-			"lyric_id": r.LyricID,
 			"source":   r.Source,
 		})
 	}
@@ -99,9 +97,7 @@ func (h *Handler) enqueueMusicBox(c *gin.Context) {
 		TrackID:       strings.TrimSpace(req.TrackID),
 		Title:         strings.TrimSpace(req.Title),
 		Artist:        strings.TrimSpace(req.Artist),
-		Album:         strings.TrimSpace(req.Album),
 		PicID:         strings.TrimSpace(req.PicID),
-		LyricID:       strings.TrimSpace(req.LyricID),
 		DurationMS:    duration,
 		AddedByUserID: currentUserID(c),
 	})
@@ -158,30 +154,6 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
 }
 
-func (h *Handler) getMusicBoxLyric(c *gin.Context) {
-	roomID := c.Param("room_id")
-	if !h.requireMember(c, roomID) {
-		return
-	}
-	if !h.musicBoxReady(c) {
-		return
-	}
-	lyricID := strings.TrimSpace(c.Query("id"))
-	if lyricID == "" {
-		lyricID = strings.TrimSpace(c.Query("lyric_id"))
-	}
-	if lyricID == "" {
-		h.jsonError(c, http.StatusBadRequest, "validation_failed", "id is required")
-		return
-	}
-	lyric, err := h.MusicBox.GD().Lyric(c.Request.Context(), c.Query("source"), lyricID)
-	if err != nil {
-		h.jsonError(c, http.StatusBadGateway, "upstream_error", "lyric fetch failed: "+err.Error())
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"lyric": lyric.Lyric, "tlyric": lyric.TranslatedLyric})
-}
-
 // musicBoxItemOwnedBy reports whether itemID belongs to roomID and was added
 // by userID.
 func (h *Handler) musicBoxItemOwnedBy(roomID, itemID, userID string) bool {
@@ -221,20 +193,18 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 	queue := make([]gin.H, 0, len(items))
 	for _, it := range items {
 		queue = append(queue, gin.H{
-			"id":              it.ID,
-			"source":          it.Source,
-			"track_id":        it.TrackID,
-			"title":           it.Title,
-			"artist":          it.Artist,
-			"album":           it.Album,
-			"pic_id":          it.PicID,
-			"lyric_id":        it.LyricID,
-			"duration_ms":     it.DurationMS,
-			"status":          string(it.Status),
-			"file_size_bytes": it.FileSizeBytes,
-			"error":           it.Error,
+			"id":               it.ID,
+			"source":           it.Source,
+			"track_id":         it.TrackID,
+			"title":            it.Title,
+			"artist":           it.Artist,
+			"pic_id":           it.PicID,
+			"duration_ms":      it.DurationMS,
+			"status":           string(it.Status),
+			"file_size_bytes":  it.FileSizeBytes,
+			"error":            it.Error,
 			"added_by_user_id": it.AddedByUserID,
-			"created_at":      formatMillis(it.CreatedAt),
+			"created_at":       formatMillis(it.CreatedAt),
 		})
 	}
 	return gin.H{
