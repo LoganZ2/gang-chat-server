@@ -61,7 +61,8 @@ func (h *Handler) joinRoom(c *gin.Context) {
 	if !h.roomExists(c, roomID) {
 		return
 	}
-	if !h.bindOptionalJSON(c, nil) {
+	var req joinRoomRequest
+	if !h.bindOptionalJSON(c, &req) {
 		return
 	}
 	userID := currentUserID(c)
@@ -76,16 +77,18 @@ func (h *Handler) joinRoom(c *gin.Context) {
 	if alreadyMember == 0 && policy == "approval_required" && !isSuperuser {
 		now := nowMillis()
 		id := newID("jrq")
+		reason := cleanJoinRequestReason(req.Reason)
 		_, err := h.DB.Exec(
-			`INSERT INTO join_requests (id, room_id, user_id, status, created_at, updated_at)
-			 VALUES (?, ?, ?, 'pending', ?, ?)
+			`INSERT INTO join_requests (id, room_id, user_id, status, reason, created_at, updated_at)
+			 VALUES (?, ?, ?, 'pending', ?, ?, ?)
 			 ON CONFLICT(room_id, user_id) DO UPDATE SET
 			   status = 'pending',
+			   reason = excluded.reason,
 			   created_at = excluded.created_at,
 			   updated_at = excluded.updated_at,
 			   reviewer_user_id = NULL,
 			   reviewed_at = NULL`,
-			id, roomID, userID, now, now,
+			id, roomID, userID, reason, now, now,
 		)
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to create join request")
@@ -95,7 +98,7 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		var createdAt int64
 		_ = h.DB.QueryRow(`SELECT id, status, created_at FROM join_requests WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&requestID, &status, &createdAt)
 		h.publishRoomApplicationsUpdated(userID)
-		c.JSON(http.StatusAccepted, gin.H{"join_request": gin.H{"id": requestID, "room_id": roomID, "status": status, "created_at": formatMillis(createdAt)}})
+		c.JSON(http.StatusAccepted, gin.H{"join_request": gin.H{"id": requestID, "room_id": roomID, "status": status, "reason": reason, "created_at": formatMillis(createdAt)}})
 		return
 	}
 	if alreadyMember == 0 && policy == "closed" && !isSuperuser {

@@ -1711,11 +1711,16 @@ func TestApprovalRequiredJoinFlow(t *testing.T) {
 	room := api.createRoom(owner.Token, map[string]any{"name": "Approval Room"})
 	roomID := room["id"].(string)
 
-	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", joiner.Token, nil)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", joiner.Token, map[string]any{
+		"reason": "  I work with this team.  ",
+	})
 	api.requireStatus(status, http.StatusAccepted, response)
 	joinRequest := response["join_request"].(map[string]any)
 	if joinRequest["status"] != "pending" {
 		t.Fatalf("join request should be pending: %v", joinRequest)
+	}
+	if joinRequest["reason"] != "I work with this team." {
+		t.Fatalf("join request should include trimmed reason: %v", joinRequest)
 	}
 
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/join-requests?status=pending", owner.Token, nil)
@@ -1723,6 +1728,9 @@ func TestApprovalRequiredJoinFlow(t *testing.T) {
 	requests := response["requests"].([]any)
 	if len(requests) != 1 || requests[0].(map[string]any)["id"] != joinRequest["id"] {
 		t.Fatalf("pending join request not listed: %v", response)
+	}
+	if requests[0].(map[string]any)["reason"] != "I work with this team." {
+		t.Fatalf("admin join request should include reason: %v", response)
 	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+joinRequest["id"].(string), owner.Token, map[string]any{"decision": "approve"})
@@ -1744,7 +1752,9 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	room := api.createRoom(owner.Token, map[string]any{"name": "Application Room"})
 	roomID := room["id"].(string)
 
-	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", joiner.Token, nil)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", joiner.Token, map[string]any{
+		"reason": "Please let me in",
+	})
 	api.requireStatus(status, http.StatusAccepted, response)
 	requestID := response["join_request"].(map[string]any)["id"].(string)
 
@@ -1757,6 +1767,9 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	application := applications[0].(map[string]any)
 	if application["status"] != "pending" || application["reviewer"] != nil {
 		t.Fatalf("pending application payload mismatch: %v", application)
+	}
+	if application["reason"] != "Please let me in" {
+		t.Fatalf("application should include reason: %v", application)
 	}
 	if application["room"].(map[string]any)["name"] != "Application Room" {
 		t.Fatalf("application should include room payload: %v", application)
@@ -1808,6 +1821,8 @@ func TestRoomInviteFlow(t *testing.T) {
 	joiner := api.register("invite_joiner")
 	pendingUser := api.register("invite_pending")
 	rejecter := api.register("invite_rejecter")
+	multiTarget := api.register("invite_multi_target")
+	rejectMultiTarget := api.register("invite_reject_multi_target")
 	openInviter := api.register("invite_open_inviter")
 	openTarget := api.register("invite_open_target")
 	leftInviter := api.register("invite_left_inviter")
@@ -1897,11 +1912,15 @@ func TestRoomInviteFlow(t *testing.T) {
 	pendingInviteID := response["invite"].(map[string]any)["id"].(string)
 	status, response = api.request(http.MethodPatch, "/room-invites/"+pendingInviteID, pendingUser.Token, map[string]any{
 		"decision": "accept",
+		"reason":   "Invited by Jordan",
 	})
 	api.requireStatus(status, http.StatusAccepted, response)
 	joinRequest := response["join_request"].(map[string]any)
 	if joinRequest["status"] != "pending" {
 		t.Fatalf("normal member invite should create pending join request: %v", response)
+	}
+	if joinRequest["reason"] != "Invited by Jordan" {
+		t.Fatalf("normal member invite should carry application reason: %v", response)
 	}
 
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
@@ -1914,6 +1933,9 @@ func TestRoomInviteFlow(t *testing.T) {
 	requests := response["requests"].([]any)
 	if len(requests) != 1 || requests[0].(map[string]any)["id"] != joinRequest["id"] {
 		t.Fatalf("pending invite acceptance should be visible to admins: %v", response)
+	}
+	if requests[0].(map[string]any)["reason"] != "Invited by Jordan" {
+		t.Fatalf("pending invite acceptance should expose reason to admins: %v", response)
 	}
 
 	openRoom := api.createRoom(owner.Token, map[string]any{"name": "Open Invite Room", "join_policy": "open"})
@@ -1966,6 +1988,76 @@ func TestRoomInviteFlow(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 	if got := len(response["members"].([]any)); got != 2 {
 		t.Fatalf("rejected invite should not add a membership, got %d: %v", got, response)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": multiTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	privilegedInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": multiTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if duplicateID := response["invite"].(map[string]any)["id"].(string); duplicateID != privilegedInviteID {
+		t.Fatalf("same inviter duplicate pending invite should return original invite, got %s want %s", duplicateID, privilegedInviteID)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", joiner.Token, map[string]any{
+		"user_id": multiTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	memberInviteID := response["invite"].(map[string]any)["id"].(string)
+	if memberInviteID == privilegedInviteID {
+		t.Fatalf("different inviters should create independent invites: %v", response)
+	}
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", multiTarget.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	multiPendingInvites := response["invites"].([]any)
+	if len(multiPendingInvites) != 2 {
+		t.Fatalf("target should see one pending invite per inviter, got %d: %v", len(multiPendingInvites), response)
+	}
+	status, response = api.request(http.MethodPatch, "/room-invites/"+memberInviteID, multiTarget.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	multiAcceptedRoom := response["room"].(map[string]any)
+	if multiAcceptedRoom["my_membership"].(map[string]any)["role"] != "member" {
+		t.Fatalf("admin invite in same room should allow direct join: %v", response)
+	}
+	status, response = api.request(http.MethodGet, "/room-invites?status=all", multiTarget.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	acceptedStatuses := map[string]string{}
+	for _, item := range response["invites"].([]any) {
+		inviteItem := item.(map[string]any)
+		acceptedStatuses[inviteItem["id"].(string)] = inviteItem["status"].(string)
+	}
+	if acceptedStatuses[privilegedInviteID] != "accepted" || acceptedStatuses[memberInviteID] != "accepted" {
+		t.Fatalf("accepting one same-room invite should accept every same-room pending invite: %v", response)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": rejectMultiTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	ownerRejectInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", joiner.Token, map[string]any{
+		"user_id": rejectMultiTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	memberRejectInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+memberRejectInviteID, rejectMultiTarget.Token, map[string]any{
+		"decision": "reject",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-invites?status=all", rejectMultiTarget.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	rejectStatuses := map[string]string{}
+	for _, item := range response["invites"].([]any) {
+		inviteItem := item.(map[string]any)
+		rejectStatuses[inviteItem["id"].(string)] = inviteItem["status"].(string)
+	}
+	if rejectStatuses[memberRejectInviteID] != "rejected" || rejectStatuses[ownerRejectInviteID] != "pending" {
+		t.Fatalf("rejecting should only update the selected invite: %v", response)
 	}
 
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{

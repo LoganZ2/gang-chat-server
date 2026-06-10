@@ -33,6 +33,11 @@ type roleRequest struct {
 
 type decisionRequest struct {
 	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
+}
+
+type joinRoomRequest struct {
+	Reason string `json:"reason"`
 }
 
 type muteRequest struct {
