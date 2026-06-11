@@ -747,7 +747,7 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 	// room_updated wouldn't carry it. Tell the affected user directly so their
 	// permissions UI reflects the change without a manual refetch.
 	h.publishRoomRole(roomID, targetID)
-	c.JSON(http.StatusOK, gin.H{"member": h.memberPayload(roomID, targetID)})
+	c.JSON(http.StatusOK, gin.H{"member": h.memberPayload(roomID, targetID, actorID)})
 }
 
 func (h *Handler) transferRoomCreator(c *gin.Context) {
@@ -1080,7 +1080,7 @@ func (h *Handler) myRoomSettingsPayload(roomID, userID string) gin.H {
 	}
 }
 
-func (h *Handler) memberPayload(roomID, userID string) gin.H {
+func (h *Handler) memberPayload(roomID, userID, viewerID string) gin.H {
 	var id, uid, username, role string
 	var displayName, avatarURL, defaultAvatar sql.NullString
 	var joinedAt int64
@@ -1090,7 +1090,15 @@ func (h *Handler) memberPayload(roomID, userID string) gin.H {
 		 WHERE rm.room_id = ? AND rm.user_id = ?`,
 		roomID, userID,
 	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &role, &joinedAt)
-	return gin.H{"user": summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar), "role": role, "joined_at": formatMillis(joinedAt)}
+	user := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+	isOnline := h.isUserOnlineForViewer(id, viewerID)
+	user.IsOnline = &isOnline
+	return gin.H{
+		"user":      user,
+		"role":      role,
+		"is_online": isOnline,
+		"joined_at": formatMillis(joinedAt),
+	}
 }
 
 func (h *Handler) deleteRoomInviteHistoryForTargetTx(tx *sql.Tx, roomID, targetUserID string) error {
