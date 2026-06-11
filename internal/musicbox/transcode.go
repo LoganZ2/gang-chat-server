@@ -56,6 +56,13 @@ func (t *transcoder) transcode(ctx context.Context, sourceURL, dstPath string) (
 		"-vn",
 		"-c:a", "libopus",
 		"-b:a", t.opusBitrate,
+		// In-band FEC embeds a low-bitrate copy of the previous frame in each
+		// packet so listeners recover isolated packet loss without a retransmit
+		// — the main stability win for the broadcast. packet_loss tells the
+		// encoder how aggressively to protect; ~10% is the sweet spot (audible
+		// loss recovery, negligible bitrate/quality cost when the network is fine).
+		"-fec", "1",
+		"-packet_loss", "10",
 		"-ar", "48000",
 		"-ac", "2",
 		"-f", "ogg",
