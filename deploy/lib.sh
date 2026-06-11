@@ -98,27 +98,19 @@ status_service() {
 
 # --- service definitions -------------------------------------------------
 
-# ensure_ffmpeg makes sure ffmpeg + ffprobe are present, since the music box
-# downloads tracks and transcodes them to Opus on the server. Idempotent:
-# does nothing if both are already on PATH. Best-effort install via apt.
+# ensure_ffmpeg checks that ffmpeg + ffprobe are present, since the music box
+# downloads tracks and transcodes them to Opus on the server. It does NOT
+# install anything (ffmpeg is provisioned manually on this host); it only warns
+# when the binaries are missing so the music box's degradation is diagnosable.
+# Callers treat a non-zero return as non-fatal (see svc_gang_start).
 ensure_ffmpeg() {
   if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
     return 0
   fi
-  echo "[ffmpeg] not found, installing (needed by the music box)..."
-  local SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo "[ffmpeg] apt-get not available; install ffmpeg manually" >&2
-    return 1
-  fi
-  $SUDO apt-get update
-  $SUDO apt-get install -y --no-install-recommends ffmpeg
-  if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
-    echo "[ffmpeg] installed: $(ffmpeg -version 2>/dev/null | sed -n '1p')"
-  else
-    echo "[ffmpeg] install failed; the music box will be degraded" >&2
-    return 1
-  fi
+  echo "[ffmpeg] ffmpeg/ffprobe not found on PATH; install it manually" >&2
+  echo "[ffmpeg]   (e.g. sudo apt-get install -y ffmpeg). The music box will" >&2
+  echo "[ffmpeg]   be degraded until ffmpeg is available." >&2
+  return 1
 }
 
 svc_gang_start()    { ensure_ffmpeg || true; start_service gang    "$GANG_BIN"; }
