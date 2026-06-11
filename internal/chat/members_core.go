@@ -99,8 +99,11 @@ func (h *Handler) listMembers(c *gin.Context) {
 			v := formatMillis(textMutedUntil.Int64)
 			mutedUntil = &v
 		}
+		user := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+		isOnline := h.isUserOnline(id)
+		user.IsOnline = &isOnline
 		members = append(members, currentMember{
-			User:           summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar),
+			User:           user,
 			Role:           role,
 			TextMutedUntil: mutedUntil,
 			JoinedAt:       formatMillis(joinedAt),

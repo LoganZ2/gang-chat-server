@@ -903,11 +903,14 @@ func (h *Handler) listJoinRequests(c *gin.Context) {
 	defer rows.Close()
 	requests := make([]gin.H, 0)
 	for rows.Next() {
-		request, err := scanJoinRequest(rows)
+		request, targetUserID, err := scanJoinRequest(rows)
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "read join request failed")
 			return
 		}
+		source, inviters := h.joinRequestSourcePayload(roomID, targetUserID)
+		request["source"] = source
+		request["inviters"] = inviters
 		requests = append(requests, request)
 	}
 	c.JSON(http.StatusOK, gin.H{"requests": requests, "next_cursor": nil})
@@ -1085,17 +1088,57 @@ func (h *Handler) memberPayload(roomID, userID string) gin.H {
 	return gin.H{"user": summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar), "role": role, "joined_at": formatMillis(joinedAt)}
 }
 
-func scanJoinRequest(rows *sql.Rows) (gin.H, error) {
+func scanJoinRequest(rows *sql.Rows) (gin.H, string, error) {
 	var requestID, status, reason, id, uid, username string
 	var displayName, avatarURL, defaultAvatar sql.NullString
 	var createdAt int64
 	if err := rows.Scan(&requestID, &status, &reason, &createdAt, &id, &uid, &username, &displayName, &avatarURL, &defaultAvatar); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	return gin.H{
 		"id": requestID, "status": status, "reason": reason, "created_at": formatMillis(createdAt),
 		"user": summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar),
-	}, nil
+	}, id, nil
+}
+
+func (h *Handler) joinRequestSourcePayload(roomID, targetUserID string) (string, []userSummary) {
+	rows, err := h.DB.Query(
+		`SELECT DISTINCT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        irm.room_display_name, irm.role
+		 FROM room_invites ri
+		 JOIN users u ON u.id = ri.inviter_user_id
+		 LEFT JOIN room_memberships irm ON irm.room_id = ri.room_id AND irm.user_id = ri.inviter_user_id
+		 WHERE ri.room_id = ? AND ri.target_user_id = ? AND ri.status IN ('pending', 'accepted')
+		 ORDER BY ri.created_at ASC`,
+		roomID, targetUserID,
+	)
+	if err != nil {
+		return "public_search", []userSummary{}
+	}
+	defer rows.Close()
+
+	inviters := make([]userSummary, 0)
+	for rows.Next() {
+		var id, uid, username string
+		var displayName, avatarURL, defaultAvatar, roomDisplayName, roomRole sql.NullString
+		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &roomDisplayName, &roomRole); err != nil {
+			continue
+		}
+		summary := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+		summary.RoomDisplayName = nullableString(roomDisplayName)
+		if roomRole.Valid && roomRole.String != "" {
+			summary.RoomRole = roomRole.String
+		} else if h.isSuperuser(id) {
+			summary.RoomRole = "superuser"
+		} else {
+			summary.RoomRole = "left"
+		}
+		inviters = append(inviters, summary)
+	}
+	if len(inviters) == 0 {
+		return "public_search", inviters
+	}
+	return "invitation", inviters
 }
 
 func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {

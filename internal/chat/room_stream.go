@@ -184,6 +184,17 @@ func (h *Handler) publishRoomUpdated(roomID string, exclude ...string) {
 	}
 }
 
+func (h *Handler) publishRoomsUpdated(roomIDs []string) {
+	seen := map[string]bool{}
+	for _, roomID := range roomIDs {
+		if roomID == "" || seen[roomID] {
+			continue
+		}
+		seen[roomID] = true
+		h.publishRoomUpdated(roomID)
+	}
+}
+
 // publishRoomDeleted tells the given users to drop roomID from their list. The
 // payload is intentionally minimal — there's nothing left to snapshot. Used
 // both when a room is destroyed (audience = its former members) and when a

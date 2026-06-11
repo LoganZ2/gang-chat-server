@@ -47,13 +47,17 @@ func (h *Handler) liveStream(c *gin.Context) {
 
 	sub := h.Bus.Subscribe(userID)
 	sub.SetRooms(rooms)
-	defer sub.Close()
+	defer func() {
+		sub.Close()
+		h.publishRoomsUpdated(rooms)
+	}()
 
 	// Tell the client the stream is live and hand it the server clock so it
 	// can sanity-check its own timers.
 	if err := writeSSE(w, "ready", gin.H{"server_time": formatMillis(nowMillis())}); err != nil {
 		return
 	}
+	h.publishRoomsUpdated(rooms)
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()

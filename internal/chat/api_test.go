@@ -693,6 +693,15 @@ func TestRoomOnlineMemberCountUsesActiveConnections(t *testing.T) {
 	if card["online_member_count"] != float64(2) {
 		t.Fatalf("room card should include online member count: %v", card)
 	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	ownerMember := memberByUserID(t, response, owner.User["id"].(string))
+	aliceMember := memberByUserID(t, response, alice.User["id"].(string))
+	if ownerMember["user"].(map[string]any)["is_online"] != true ||
+		aliceMember["user"].(map[string]any)["is_online"] != true {
+		t.Fatalf("member payload should expose online state: %v", response)
+	}
 }
 
 func TestRoomLeaveDeletesAndPromotesAdmin(t *testing.T) {
@@ -1650,6 +1659,12 @@ func TestApprovalRequiredJoinFlow(t *testing.T) {
 	if requests[0].(map[string]any)["reason"] != "I work with this team." {
 		t.Fatalf("admin join request should include reason: %v", response)
 	}
+	if requests[0].(map[string]any)["source"] != "public_search" {
+		t.Fatalf("direct application should be marked as public search: %v", response)
+	}
+	if got := len(requests[0].(map[string]any)["inviters"].([]any)); got != 0 {
+		t.Fatalf("direct application should not list inviters, got %d: %v", got, response)
+	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+joinRequest["id"].(string), owner.Token, map[string]any{"decision": "approve"})
 	api.requireStatus(status, http.StatusOK, response)
@@ -1854,6 +1869,13 @@ func TestRoomInviteFlow(t *testing.T) {
 	}
 	if requests[0].(map[string]any)["reason"] != "Invited by Jordan" {
 		t.Fatalf("pending invite acceptance should expose reason to admins: %v", response)
+	}
+	if requests[0].(map[string]any)["source"] != "invitation" {
+		t.Fatalf("pending invite acceptance should expose invitation source: %v", response)
+	}
+	inviters := requests[0].(map[string]any)["inviters"].([]any)
+	if len(inviters) != 1 || inviters[0].(map[string]any)["username"] != joiner.User["username"] {
+		t.Fatalf("pending invite acceptance should list inviters: %v", response)
 	}
 
 	openRoom := api.createRoom(owner.Token, map[string]any{"name": "Open Invite Room", "join_policy": "open"})
