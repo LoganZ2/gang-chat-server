@@ -367,6 +367,85 @@ func findMessage(t *testing.T, response map[string]any, messageID string) map[st
 	return nil
 }
 
+func listRoomMessages(t *testing.T, api *apiHarness, token, roomID string) []map[string]any {
+	t.Helper()
+	status, response := api.request(http.MethodGet, "/rooms/"+roomID+"/messages?limit=100", token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	items, ok := response["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages response missing messages: %v", response)
+	}
+	messages := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("message item is not an object: %v", item)
+		}
+		messages = append(messages, msg)
+	}
+	return messages
+}
+
+func requireSystemMessage(t *testing.T, messages []map[string]any, event, subjectID string) map[string]any {
+	t.Helper()
+	for _, msg := range messages {
+		if msg["type"] != systemMessageType {
+			continue
+		}
+		attachment := systemAttachment(t, msg)
+		if attachment["event"] != event {
+			continue
+		}
+		if systemAttachmentSubjectID(t, attachment) == subjectID {
+			return msg
+		}
+	}
+	t.Fatalf("system message %s for %s not found: %v", event, subjectID, messages)
+	return nil
+}
+
+func systemAttachment(t *testing.T, msg map[string]any) map[string]any {
+	t.Helper()
+	items, ok := msg["attachments"].([]any)
+	if !ok || len(items) == 0 {
+		t.Fatalf("system message missing attachments: %v", msg)
+	}
+	attachment, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("system attachment is not an object: %v", items[0])
+	}
+	return attachment
+}
+
+func systemAttachmentSubjectID(t *testing.T, attachment map[string]any) string {
+	t.Helper()
+	if target, ok := attachment["target"].(map[string]any); ok {
+		return target["id"].(string)
+	}
+	user, ok := attachment["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("system attachment missing user: %v", attachment)
+	}
+	return user["id"].(string)
+}
+
+func requireSystemRoleChange(t *testing.T, messages []map[string]any, subjectID, toRole string) map[string]any {
+	t.Helper()
+	for _, msg := range messages {
+		if msg["type"] != systemMessageType {
+			continue
+		}
+		attachment := systemAttachment(t, msg)
+		if attachment["event"] == systemEventRoomRoleChanged &&
+			systemAttachmentSubjectID(t, attachment) == subjectID &&
+			attachment["to_role"] == toRole {
+			return msg
+		}
+	}
+	t.Fatalf("role-change system message for %s to %s not found: %v", subjectID, toRole, messages)
+	return nil
+}
+
 func TestPublicUIDAndRIDRanges(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("owner_ids")
@@ -622,6 +701,28 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 	attachments := fileHit["message"].(map[string]any)["attachments"].([]any)
 	if attachments[0].(map[string]any)["name"] != "screenshot.png" {
 		t.Fatalf("file search should return the filename-matched attachment: %v", fileHit)
+	}
+
+	status, response = api.request(http.MethodGet, "/search?q=Team&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages = response["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("message search should match joined room name: %v", response)
+	}
+	messageHit = messages[0].(map[string]any)
+	if messageHit["room"].(map[string]any)["id"] != teamRoomID {
+		t.Fatalf("room-name message search should keep room context: %v", messageHit)
+	}
+
+	status, response = api.request(http.MethodGet, "/search?q=search_all_owner&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages = response["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("message search should match sender username: %v", response)
+	}
+	messageHit = messages[0].(map[string]any)
+	if messageHit["message"].(map[string]any)["sender"].(map[string]any)["username"] != "search_all_owner" {
+		t.Fatalf("username message search should return sender context: %v", messageHit)
 	}
 }
 
@@ -930,6 +1031,7 @@ func TestOnlyAdminsCanRemoveMembers(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("remove_owner")
 	admin := api.register("remove_admin")
+	peerAdmin := api.register("remove_peer_admin")
 	regular := api.register("remove_regular")
 	target := api.register("remove_target")
 
@@ -939,10 +1041,14 @@ func TestOnlyAdminsCanRemoveMembers(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", regular.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", peerAdmin.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", target.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+admin.User["id"].(string), owner.Token, map[string]any{"role": "admin"})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+peerAdmin.User["id"].(string), owner.Token, map[string]any{"role": "admin"})
 	api.requireStatus(status, http.StatusOK, response)
 
 	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+target.User["id"].(string), regular.Token, nil)
@@ -956,6 +1062,16 @@ func TestOnlyAdminsCanRemoveMembers(t *testing.T) {
 		t.Fatalf("regular member should not remove target membership, got %d", targetMemberships)
 	}
 
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+peerAdmin.User["id"].(string), admin.Token, nil)
+	api.requireStatus(status, http.StatusForbidden, response)
+	var peerAdminMemberships int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, peerAdmin.User["id"].(string)).Scan(&peerAdminMemberships); err != nil {
+		t.Fatalf("count peer admin memberships after admin remove attempt: %v", err)
+	}
+	if peerAdminMemberships != 1 {
+		t.Fatalf("admin should not remove peer admin membership, got %d", peerAdminMemberships)
+	}
+
 	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+target.User["id"].(string), admin.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	if err := api.db.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, target.User["id"].(string)).Scan(&targetMemberships); err != nil {
@@ -963,6 +1079,80 @@ func TestOnlyAdminsCanRemoveMembers(t *testing.T) {
 	}
 	if targetMemberships != 0 {
 		t.Fatalf("admin should remove target membership, got %d", targetMemberships)
+	}
+}
+
+func TestSystemMessagesForRoomEvents(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("system_owner")
+	member := api.register("system_member")
+	target := api.register("system_target")
+	room := api.createRoom(owner.Token, map[string]any{"name": "System Events", "join_policy": "open"})
+	roomID := room["id"].(string)
+	ownerID := owner.User["id"].(string)
+	memberID := member.User["id"].(string)
+	targetID := target.User["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "system_live_member",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", member.Token, map[string]any{
+		"connection_state": "left",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+memberID, owner.Token, map[string]any{"role": "admin"})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/creator", owner.Token, map[string]any{"user_id": memberID})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+targetID, owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	messages := listRoomMessages(t, api, member.Token, roomID)
+	join := requireSystemMessage(t, messages, systemEventRoomMemberJoined, memberID)
+	if join["body"] != "加入了房间" {
+		t.Fatalf("join message should carry sidebar body: %v", join)
+	}
+	liveJoin := requireSystemMessage(t, messages, systemEventLiveJoined, memberID)
+	if liveJoin["body"] != "进入了直播间" {
+		t.Fatalf("live join message should carry body: %v", liveJoin)
+	}
+	liveLeft := requireSystemMessage(t, messages, systemEventLiveLeft, memberID)
+	if liveLeft["body"] != "退出了直播间" {
+		t.Fatalf("live left message should carry body: %v", liveLeft)
+	}
+
+	admin := requireSystemRoleChange(t, messages, memberID, "admin")
+	adminAttachment := systemAttachment(t, admin)
+	if adminAttachment["from_role"] != "member" {
+		t.Fatalf("admin role system attachment mismatch: %v", adminAttachment)
+	}
+	if actor := adminAttachment["actor"].(map[string]any); actor["id"] != ownerID {
+		t.Fatalf("admin role system message should include actor: %v", adminAttachment)
+	}
+
+	ownerTransfer := requireSystemRoleChange(t, messages, memberID, "owner")
+	if ownerTransfer["body"] == "" {
+		t.Fatalf("creator promotion should carry a body: %v", ownerTransfer)
+	}
+	ownerDemotion := requireSystemRoleChange(t, messages, ownerID, "admin")
+	ownerDemotionAttachment := systemAttachment(t, ownerDemotion)
+	if ownerDemotionAttachment["from_role"] != "owner" {
+		t.Fatalf("owner demotion attachment mismatch: %v", ownerDemotionAttachment)
+	}
+	if ownerDemotion["body"] != "降职为管理员" {
+		t.Fatalf("owner demotion body should omit actor: %v", ownerDemotion)
+	}
+
+	removed := requireSystemMessage(t, messages, systemEventRoomMemberRemoved, targetID)
+	removedAttachment := systemAttachment(t, removed)
+	if actor := removedAttachment["actor"].(map[string]any); actor["id"] != ownerID {
+		t.Fatalf("removed system message should include actor: %v", removedAttachment)
 	}
 }
 

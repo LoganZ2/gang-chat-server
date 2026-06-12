@@ -51,6 +51,14 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 			h.jsonError(c, http.StatusNotFound, "not_found", "live participant not found")
 			return
 		}
+		if err := h.appendSystemMessage(roomID, systemMessageSpec{
+			Event:  systemEventLiveLeft,
+			UserID: targetID,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
+			return
+		}
+		h.publishRoomUpdated(roomID)
 
 	case "mute_mic":
 		if err := h.Live.MuteMicrophone(roomID, targetID, true); err != nil {

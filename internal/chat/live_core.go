@@ -46,6 +46,13 @@ func (h *Handler) joinLive(c *gin.Context) {
 		return
 	}
 
+	var previousConnectionState string
+	alreadyInLive := h.DB.QueryRow(
+		`SELECT connection_state FROM live_participants WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		userID,
+	).Scan(&previousConnectionState) == nil && previousConnectionState != "left"
+
 	now := nowMillis()
 	liveSessionID := newID("live")
 	_, err := h.DB.Exec(
@@ -75,6 +82,15 @@ func (h *Handler) joinLive(c *gin.Context) {
 		)
 	}
 	_, _ = h.DB.Exec(`UPDATE rooms SET updated_at = ? WHERE id = ?`, now, roomID)
+	if !alreadyInLive {
+		if err := h.appendSystemMessage(roomID, systemMessageSpec{
+			Event:  systemEventLiveJoined,
+			UserID: userID,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
+			return
+		}
+	}
 
 	participant, err := h.liveParticipantForUser(roomID, userID)
 	if err != nil {
@@ -104,6 +120,9 @@ func (h *Handler) joinLive(c *gin.Context) {
 	h.PublishLiveSnapshot(roomID, "live_participant_joined", map[string]any{
 		"user_id": userID,
 	})
+	if !alreadyInLive {
+		h.publishRoomUpdated(roomID)
+	}
 
 	h.idempotentJSON(c, http.StatusOK, rawBody, liveJoinResponse{
 		LiveKit: liveKitInfo{
@@ -139,6 +158,16 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid connection_state")
 		return
 	}
+
+	var previousConnectionState string
+	_ = h.DB.QueryRow(
+		`SELECT connection_state FROM live_participants WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		userID,
+	).Scan(&previousConnectionState)
+	leftLive := req.ConnectionState != nil &&
+		*req.ConnectionState == "left" &&
+		previousConnectionState != "left"
 
 	var voiceBlocked int
 	if h.isVoiceBanned(roomID, userID) {
@@ -194,6 +223,16 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read live participant")
 		return
+	}
+	if leftLive {
+		if err := h.appendSystemMessage(roomID, systemMessageSpec{
+			Event:  systemEventLiveLeft,
+			UserID: userID,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
+			return
+		}
+		h.publishRoomUpdated(roomID)
 	}
 
 	h.PublishLiveSnapshot(roomID, "live_participant_updated", map[string]any{

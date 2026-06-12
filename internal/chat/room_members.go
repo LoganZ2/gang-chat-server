@@ -616,6 +616,13 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "accept room invite failed")
 		return
 	}
+	if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+		Event:  systemEventRoomMemberJoined,
+		UserID: userID,
+	}); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "accept room invite failed")
+		return
+	}
 	_, _ = tx.Exec(`UPDATE room_invites SET status = 'accepted', updated_at = ? WHERE room_id = ? AND target_user_id = ? AND status = 'pending'`, now, roomID, userID)
 	var reviewerID any
 	if inviterIsAdmin {
@@ -678,6 +685,10 @@ func (h *Handler) removeMember(c *gin.Context) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot remove room owner")
 		return
 	}
+	if role != "" && role != "member" && !h.canManageRoomRoles(roomID, actorID) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot remove room admin")
+		return
+	}
 	tx, err := h.DB.Begin()
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
@@ -685,6 +696,10 @@ func (h *Handler) removeMember(c *gin.Context) {
 	}
 	defer tx.Rollback()
 	liveRes, _ := tx.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, targetID)
+	removedFromLive := false
+	if n, _ := liveRes.RowsAffected(); n > 0 {
+		removedFromLive = true
+	}
 	if err := h.deleteRoomInviteHistoryForTargetTx(tx, roomID, targetID); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
 		return
@@ -703,6 +718,16 @@ func (h *Handler) removeMember(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "repair room admins failed")
 		return
 	}
+	if !pruned {
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:    systemEventRoomMemberRemoved,
+			ActorID:  actorID,
+			TargetID: targetID,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save membership failed")
 		return
@@ -714,7 +739,7 @@ func (h *Handler) removeMember(c *gin.Context) {
 	h.publishRoomInvitesUpdated(targetID)
 	if !pruned {
 		h.publishRoomUpdated(roomID)
-		if n, _ := liveRes.RowsAffected(); n > 0 {
+		if removedFromLive {
 			h.PublishLiveSnapshot(roomID, "live_participant_left", map[string]any{"user_id": targetID})
 		}
 	} else {
@@ -765,6 +790,18 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "repair room admins failed")
 		return
 	}
+	if currentRole != req.Role {
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:    systemEventRoomRoleChanged,
+			ActorID:  actorID,
+			TargetID: targetID,
+			FromRole: currentRole,
+			ToRole:   req.Role,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save membership failed")
 		return
@@ -773,6 +810,9 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 	// room_updated wouldn't carry it. Tell the affected user directly so their
 	// permissions UI reflects the change without a manual refetch.
 	h.publishRoomRole(roomID, targetID)
+	if currentRole != req.Role {
+		h.publishRoomUpdated(roomID)
+	}
 	c.JSON(http.StatusOK, gin.H{"member": h.memberPayload(roomID, targetID, actorID)})
 }
 
@@ -836,6 +876,33 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 	if _, err := tx.Exec(`UPDATE rooms SET created_by_user_id = ?, updated_at = ? WHERE id = ?`, targetID, nowMillis(), roomID); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
 		return
+	}
+	if targetRole != "owner" {
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:    systemEventRoomRoleChanged,
+			ActorID:  actorID,
+			TargetID: targetID,
+			FromRole: targetRole,
+			ToRole:   "owner",
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+			return
+		}
+	}
+	for _, ownerID := range previousOwnerIDs {
+		if ownerID == targetID {
+			continue
+		}
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:    systemEventRoomRoleChanged,
+			ActorID:  actorID,
+			TargetID: ownerID,
+			FromRole: "owner",
+			ToRole:   "admin",
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save creator transfer failed")
@@ -970,6 +1037,8 @@ func (h *Handler) reviewJoinRequest(c *gin.Context) {
 	if req.Decision == "approve" {
 		newStatus = "approved"
 		if !h.isSuperuser(userID) {
+			var alreadyMember int
+			_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&alreadyMember)
 			tx, err := h.DB.Begin()
 			if err != nil {
 				h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
@@ -980,6 +1049,15 @@ func (h *Handler) reviewJoinRequest(c *gin.Context) {
 			if _, err := h.addRoomMemberTx(tx, roomID, userID, now); err != nil {
 				h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
 				return
+			}
+			if alreadyMember == 0 {
+				if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+					Event:  systemEventRoomMemberJoined,
+					UserID: userID,
+				}); err != nil {
+					h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
+					return
+				}
 			}
 			if _, err := tx.Exec(
 				`UPDATE join_requests

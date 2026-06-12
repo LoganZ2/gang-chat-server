@@ -192,9 +192,19 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
-	if _, err := h.addRoomMemberTx(tx, roomID, userID, nowMillis()); err != nil {
+	now := nowMillis()
+	if _, err := h.addRoomMemberTx(tx, roomID, userID, now); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join room")
 		return
+	}
+	if alreadyMember == 0 {
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:  systemEventRoomMemberJoined,
+			UserID: userID,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room membership")
@@ -257,6 +267,10 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 	defer tx.Rollback()
 
 	liveRes, _ := tx.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID)
+	leftLive := false
+	if n, _ := liveRes.RowsAffected(); n > 0 {
+		leftLive = true
+	}
 	if err := h.deleteRoomInviteHistoryForTargetTx(tx, roomID, userID); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to leave room")
 		return
@@ -271,6 +285,24 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to repair room admins")
 		return
 	}
+	if !pruned {
+		if leftLive {
+			if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+				Event:  systemEventLiveLeft,
+				UserID: userID,
+			}); err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
+				return
+			}
+		}
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:  systemEventRoomMemberLeft,
+			UserID: userID,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room state")
 		return
@@ -284,7 +316,7 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 	h.publishRoomInvitesUpdated(userID)
 	if !pruned {
 		h.publishRoomUpdated(roomID)
-		if n, _ := liveRes.RowsAffected(); n > 0 {
+		if leftLive {
 			h.PublishLiveSnapshot(roomID, "live_participant_left", map[string]any{"user_id": userID})
 		}
 	} else {

@@ -170,9 +170,17 @@ func (h *Handler) searchPublicRooms(userID, query string, limit int) ([]publicRo
 func (h *Handler) searchMessages(userID, query string, limit int) ([]messageSearchResult, error) {
 	return h.searchMessageRows(
 		userID,
-		`m.type NOT IN ('file', 'audio')
-		  AND instr(lower(m.body), lower(?)) > 0`,
-		[]any{query},
+		`m.type NOT IN ('file', 'audio', 'system')
+		  AND (
+		    instr(lower(m.body), lower(?)) > 0
+		    OR instr(lower(r.name), lower(?)) > 0
+		    OR instr(lower(COALESCE(r.rid, '')), lower(?)) > 0
+		    OR instr(lower(u.username), lower(?)) > 0
+		    OR instr(lower(COALESCE(u.display_name, '')), lower(?)) > 0
+		    OR instr(lower(COALESCE(u.uid, '')), lower(?)) > 0
+		    OR instr(lower(COALESCE(sender_rm.room_display_name, '')), lower(?)) > 0
+		  )`,
+		[]any{query, query, query, query, query, query, query},
 		limit,
 	)
 }
@@ -211,10 +219,12 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 		        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
 		        m.force_deleted_by_user_id, m.created_at,
 		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        sender_rm.room_display_name,
 		        r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
 		 JOIN rooms r ON r.id = m.room_id
+		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 `+accessJoin+`
 		 WHERE m.is_recalled = 0
 		   AND m.is_force_deleted = 0
@@ -246,7 +256,7 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 	var msg message
 	var room searchRoomContext
 	var senderID, senderUID, senderUsername string
-	var senderDisplayName, senderAvatarURL, senderDefaultAvatar sql.NullString
+	var senderDisplayName, senderAvatarURL, senderDefaultAvatar, senderRoomDisplayName sql.NullString
 	var roomRID, roomAvatarURL, roomDefaultAvatar sql.NullString
 	var mentionsJSON, attachmentsJSON string
 	var recalledAt, forceDeletedAt sql.NullInt64
@@ -258,11 +268,15 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
+		&senderRoomDisplayName,
 		&room.ID, &roomRID, &room.Name, &roomAvatarURL, &roomDefaultAvatar,
 	); err != nil {
 		return message{}, searchRoomContext{}, err
 	}
 	msg.Sender = summaryFromUserFields(senderID, senderUID, senderUsername, senderDisplayName, senderAvatarURL, senderDefaultAvatar)
+	if senderRoomDisplayName.Valid && senderRoomDisplayName.String != "" {
+		msg.Sender.RoomDisplayName = &senderRoomDisplayName.String
+	}
 	msg.Mentions = decodeJSONArray(mentionsJSON)
 	msg.Attachments = decodeJSONArray(attachmentsJSON)
 	msg.IsRecalled = isRecalled != 0
