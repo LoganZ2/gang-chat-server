@@ -170,7 +170,7 @@ func (h *Handler) searchPublicRooms(userID, query string, limit int) ([]publicRo
 func (h *Handler) searchMessages(userID, query string, limit int) ([]messageSearchResult, error) {
 	return h.searchMessageRows(
 		userID,
-		`m.type != 'file'
+		`m.type NOT IN ('file', 'audio')
 		  AND instr(lower(m.body), lower(?)) > 0`,
 		[]any{query},
 		limit,
@@ -180,9 +180,17 @@ func (h *Handler) searchMessages(userID, query string, limit int) ([]messageSear
 func (h *Handler) searchFiles(userID, query string, limit int) ([]messageSearchResult, error) {
 	return h.searchMessageRows(
 		userID,
-		`(m.type = 'file' OR instr(lower(m.attachments_json), '"type":"file"') > 0 OR instr(lower(m.attachments_json), '"type": "file"') > 0)
-		  AND (instr(lower(m.body), lower(?)) > 0 OR instr(lower(m.attachments_json), lower(?)) > 0)`,
-		[]any{query, query},
+		`EXISTS (
+		    SELECT 1
+		    FROM json_each(m.attachments_json) attachment
+		    WHERE (m.type = 'file' OR lower(COALESCE(json_extract(attachment.value, '$.type'), '')) = 'file')
+		      AND (
+		        instr(lower(COALESCE(json_extract(attachment.value, '$.name'), '')), lower(?)) > 0
+		        OR instr(lower(COALESCE(json_extract(attachment.value, '$.filename'), '')), lower(?)) > 0
+		        OR instr(lower(COALESCE(json_extract(attachment.value, '$.asset.filename'), '')), lower(?)) > 0
+		      )
+		  )`,
+		[]any{query, query, query},
 		limit,
 	)
 }

@@ -537,6 +537,42 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 		},
 	})
 	api.requireStatus(status, http.StatusCreated, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+teamRoomID+"/messages", owner.Token, map[string]any{
+		"client_message_id": "search_image_" + idgen.New("client"),
+		"type":              "file",
+		"body":              "Alpha image caption should not match files",
+		"attachments": []any{
+			map[string]any{
+				"type": "file",
+				"name": "screenshot.png",
+				"asset": map[string]any{
+					"id":        "asset_alpha_image",
+					"url":       "/assets/alpha-image.png",
+					"mime_type": "image/png",
+					"filename":  "screenshot.png",
+				},
+			},
+		},
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+teamRoomID+"/messages", owner.Token, map[string]any{
+		"client_message_id": "search_audio_" + idgen.New("client"),
+		"type":              "audio",
+		"body":              "Alpha voice note",
+		"attachments": []any{
+			map[string]any{
+				"type": "file",
+				"name": "voice-note.m4a",
+				"asset": map[string]any{
+					"id":        "asset_voice",
+					"url":       "/assets/voice-note.m4a",
+					"mime_type": "audio/mp4",
+					"filename":  "voice-note.m4a",
+				},
+			},
+		},
+	})
+	api.requireStatus(status, http.StatusCreated, response)
 	api.sendMessage(owner.Token, privateRoom["id"].(string), "Alpha private note")
 
 	status, response = api.request(http.MethodGet, "/search?q=Alpha&limit=5", member.Token, nil)
@@ -554,7 +590,7 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 
 	messages := response["messages"].([]any)
 	if len(messages) != 1 {
-		t.Fatalf("search should return text message hits: %v", response)
+		t.Fatalf("search should return text message hits and exclude voice messages: %v", response)
 	}
 	messageHit := messages[0].(map[string]any)
 	if messageHit["room"].(map[string]any)["id"] != teamRoomID || !strings.Contains(messageHit["message"].(map[string]any)["body"].(string), "roadmap") {
@@ -568,6 +604,24 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 	fileHit := files[0].(map[string]any)
 	if fileHit["room"].(map[string]any)["id"] != teamRoomID || fileHit["message"].(map[string]any)["type"] != "file" {
 		t.Fatalf("search file hit should include room context and file message: %v", fileHit)
+	}
+
+	status, response = api.request(http.MethodGet, "/search?q=image&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["files"].([]any)); got != 0 {
+		t.Fatalf("file search should ignore attachment mime, url, id, and message body, got %d: %v", got, response)
+	}
+
+	status, response = api.request(http.MethodGet, "/search?q=screenshot&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	files = response["files"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("file search should match attachment filename: %v", response)
+	}
+	fileHit = files[0].(map[string]any)
+	attachments := fileHit["message"].(map[string]any)["attachments"].([]any)
+	if attachments[0].(map[string]any)["name"] != "screenshot.png" {
+		t.Fatalf("file search should return the filename-matched attachment: %v", fileHit)
 	}
 }
 
