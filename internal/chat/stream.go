@@ -108,7 +108,7 @@ func (h *Handler) userRoomIDs(userID string) ([]string, error) {
 	rows, err := h.DB.Query(
 		`SELECT room_id FROM room_memberships WHERE user_id = ?
 		 UNION
-		 SELECT room_id FROM live_participants WHERE user_id = ?`,
+		 SELECT room_id FROM live_participants WHERE user_id = ? AND connection_state != 'left'`,
 		userID, userID,
 	)
 	if err != nil {

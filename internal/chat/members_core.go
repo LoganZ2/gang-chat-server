@@ -286,15 +286,6 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 		return
 	}
 	if !pruned {
-		if leftLive {
-			if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
-				Event:  systemEventLiveLeft,
-				UserID: userID,
-			}); err != nil {
-				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
-				return
-			}
-		}
 		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
 			Event:  systemEventRoomMemberLeft,
 			UserID: userID,

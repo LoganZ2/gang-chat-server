@@ -516,6 +516,7 @@ func (h *Handler) livePreview(roomID string) ([]userSummary, int, error) {
 		 FROM live_participants lp
 		 JOIN users u ON u.id = lp.user_id
 		 WHERE lp.room_id = ?
+		   AND lp.connection_state != 'left'
 		 ORDER BY lp.joined_at ASC`,
 		roomID,
 	)
@@ -547,7 +548,7 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 		`SELECT m.id, u.username, m.type, m.body, m.attachments_json, m.created_at
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
-		 WHERE m.room_id = ?
+		 WHERE m.room_id = ? AND `+visibleMessageSQL("m")+`
 		 ORDER BY m.created_at DESC
 		 LIMIT 1`,
 		roomID,
@@ -569,6 +570,7 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
 	attachments := decodeJSONArray(attachmentsJSON)
 	hasAudio := messageType == "audio"
+	audioDurationMS := int64(0)
 	hasImage := false
 	hasFile := messageType == "file"
 	hasNonImageFile := false
@@ -585,6 +587,9 @@ func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
 		displayName := attachmentDisplayName(attachment)
 		if attachmentType == "audio" || strings.HasPrefix(mimeType, "audio/") {
 			hasAudio = true
+			if audioDurationMS == 0 {
+				audioDurationMS = int64FromMap(attachment, "duration_ms")
+			}
 		}
 		if attachmentType == "sticker" && stickerName == "" {
 			stickerName = displayName
@@ -605,7 +610,7 @@ func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
 		}
 	}
 	if hasAudio {
-		return "[语音]"
+		return labelledLastMessagePreview("[语音]", formatVoicePreviewDuration(audioDurationMS))
 	}
 	if messageType == "sticker" || stickerName != "" {
 		return labelledLastMessagePreview("[表情]", firstNonEmptyString(stickerName, stickerNameFromBody(body)))
@@ -617,6 +622,23 @@ func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
 		return labelledLastMessagePreview("[文件]", firstNonEmptyString(fileName, imageName, body))
 	}
 	return preview(body, 80)
+}
+
+func formatVoicePreviewDuration(durationMS int64) string {
+	if durationMS <= 0 {
+		return ""
+	}
+	totalSeconds := (durationMS + 999) / 1000
+	if totalSeconds < 60 {
+		return strconv.FormatInt(totalSeconds, 10) + "s"
+	}
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	secondsText := strconv.FormatInt(seconds, 10)
+	if seconds < 10 {
+		secondsText = "0" + secondsText
+	}
+	return strconv.FormatInt(minutes, 10) + ":" + secondsText
 }
 
 func labelledLastMessagePreview(label, name string) string {
@@ -672,6 +694,22 @@ func stringFromMap(values map[string]any, key string) string {
 	return value
 }
 
+func int64FromMap(values map[string]any, key string) int64 {
+	switch value := values[key].(type) {
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case float64:
+		return int64(value)
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
 func firstNonEmptyString(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -693,8 +731,8 @@ func (h *Handler) unreadCount(roomID, userID string) int {
 
 	var count int
 	_ = h.DB.QueryRow(
-		`SELECT COUNT(*) FROM messages
-		 WHERE room_id = ? AND sender_user_id != ? AND created_at > ?`,
+		`SELECT COUNT(*) FROM messages m
+		 WHERE m.room_id = ? AND m.sender_user_id != ? AND m.created_at > ? AND `+visibleMessageSQL("m"),
 		roomID, userID, readAt,
 	).Scan(&count)
 	return count

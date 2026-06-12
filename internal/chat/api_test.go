@@ -436,6 +436,20 @@ func requireSystemMessage(t *testing.T, messages []map[string]any, event, subjec
 	return nil
 }
 
+func hasSystemMessage(t *testing.T, messages []map[string]any, event, subjectID string) bool {
+	t.Helper()
+	for _, msg := range messages {
+		if msg["type"] != systemMessageType {
+			continue
+		}
+		attachment := systemAttachment(t, msg)
+		if attachment["event"] == event && systemAttachmentSubjectID(t, attachment) == subjectID {
+			return true
+		}
+	}
+	return false
+}
+
 func systemAttachment(t *testing.T, msg map[string]any) map[string]any {
 	t.Helper()
 	items, ok := msg["attachments"].([]any)
@@ -548,8 +562,9 @@ func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
 
 	api.sendTypedMessage(owner.Token, roomID, "audio", "voice_1.m4a", []any{
 		map[string]any{
-			"type": "audio",
-			"name": "voice_1.m4a",
+			"type":        "audio",
+			"name":        "voice_1.m4a",
+			"duration_ms": float64(15000),
 			"asset": map[string]any{
 				"id":        "asset_voice",
 				"url":       "/assets/voice_1.m4a",
@@ -558,7 +573,7 @@ func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
 			},
 		},
 	})
-	assertLastPreview("[语音]")
+	assertLastPreview("[语音] 15s")
 
 	api.sendTypedMessage(owner.Token, roomID, "file", "screenshot.png", []any{
 		map[string]any{
@@ -601,6 +616,53 @@ func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
 		},
 	})
 	assertLastPreview("[表情] wave")
+}
+
+func TestHistoricalLiveSystemMessagesAreHidden(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("hidden_live_owner")
+	member := api.register("hidden_live_member")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Hidden Live", "join_policy": "open"})
+	roomID := room["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	visible := api.sendMessage(owner.Token, roomID, "visible before live")
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/read", member.Token, map[string]any{
+		"last_read_message_id": visible["id"],
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	handler := &Handler{DB: api.db}
+	if err := handler.appendSystemMessage(roomID, systemMessageSpec{
+		Event:  systemEventLiveJoined,
+		UserID: owner.User["id"].(string),
+	}); err != nil {
+		t.Fatalf("append historical live join: %v", err)
+	}
+	if err := handler.appendSystemMessage(roomID, systemMessageSpec{
+		Event:  systemEventLiveLeft,
+		UserID: owner.User["id"].(string),
+	}); err != nil {
+		t.Fatalf("append historical live leave: %v", err)
+	}
+
+	messages := listRoomMessages(t, api, member.Token, roomID)
+	if hasSystemMessage(t, messages, systemEventLiveJoined, owner.User["id"].(string)) ||
+		hasSystemMessage(t, messages, systemEventLiveLeft, owner.User["id"].(string)) {
+		t.Fatalf("historical live system messages should be hidden: %v", messages)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card := roomCardByID(t, response, roomID)
+	last := card["last_message"].(map[string]any)
+	if last["body_preview"] != "visible before live" {
+		t.Fatalf("last_message should ignore hidden live system messages: %v", last)
+	}
+	if card["unread_count"] != float64(0) {
+		t.Fatalf("hidden live system messages should not increment unread count: %v", card)
+	}
 }
 
 func TestAttachmentDispositionUsesUTF8FilenameStar(t *testing.T) {
@@ -1224,13 +1286,11 @@ func TestSystemMessagesForRoomEvents(t *testing.T) {
 	if join["body"] != "加入了房间" {
 		t.Fatalf("join message should carry sidebar body: %v", join)
 	}
-	liveJoin := requireSystemMessage(t, messages, systemEventLiveJoined, memberID)
-	if liveJoin["body"] != "进入了直播间" {
-		t.Fatalf("live join message should carry body: %v", liveJoin)
+	if hasSystemMessage(t, messages, systemEventLiveJoined, memberID) {
+		t.Fatalf("live join should not create a system message: %v", messages)
 	}
-	liveLeft := requireSystemMessage(t, messages, systemEventLiveLeft, memberID)
-	if liveLeft["body"] != "退出了直播间" {
-		t.Fatalf("live left message should carry body: %v", liveLeft)
+	if hasSystemMessage(t, messages, systemEventLiveLeft, memberID) {
+		t.Fatalf("live leave should not create a system message: %v", messages)
 	}
 
 	admin := requireSystemRoleChange(t, messages, memberID, "admin")

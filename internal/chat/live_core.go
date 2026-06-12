@@ -82,15 +82,6 @@ func (h *Handler) joinLive(c *gin.Context) {
 		)
 	}
 	_, _ = h.DB.Exec(`UPDATE rooms SET updated_at = ? WHERE id = ?`, now, roomID)
-	if !alreadyInLive {
-		if err := h.appendSystemMessage(roomID, systemMessageSpec{
-			Event:  systemEventLiveJoined,
-			UserID: userID,
-		}); err != nil {
-			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
-			return
-		}
-	}
 
 	participant, err := h.liveParticipantForUser(roomID, userID)
 	if err != nil {
@@ -225,13 +216,6 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 		return
 	}
 	if leftLive {
-		if err := h.appendSystemMessage(roomID, systemMessageSpec{
-			Event:  systemEventLiveLeft,
-			UserID: userID,
-		}); err != nil {
-			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
-			return
-		}
 		h.publishRoomUpdated(roomID)
 	}
 
@@ -250,7 +234,7 @@ func (h *Handler) buildLiveState(roomID string, fallbackUpdatedAt int64) (liveSt
 		        u.display_name, u.avatar_url, u.default_avatar_key
 		 FROM live_participants lp
 		 JOIN users u ON u.id = lp.user_id
-		 WHERE lp.room_id = ?
+		 WHERE lp.room_id = ? AND lp.connection_state != 'left'
 		 ORDER BY lp.joined_at ASC`,
 		roomID,
 	)

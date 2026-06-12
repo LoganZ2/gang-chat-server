@@ -266,8 +266,9 @@ func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 
 	api.sendTypedMessage(owner.Token, roomID, "audio", "voice_1.m4a", []any{
 		map[string]any{
-			"type": "audio",
-			"name": "voice_1.m4a",
+			"type":        "audio",
+			"name":        "voice_1.m4a",
+			"duration_ms": float64(15000),
 			"asset": map[string]any{
 				"id":        "asset_voice",
 				"url":       "/assets/voice_1.m4a",
@@ -278,8 +279,46 @@ func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 	})
 	updated = ownerStream.await("room_updated")
 	snap = updated["snapshot"].(roomSnapshot)
-	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "[语音]" {
+	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "[语音] 15s" {
 		t.Fatalf("room_updated should label voice last_message: %+v", snap.LastMessage)
+	}
+}
+
+func TestStreamLiveLeaveRefreshesRoomSnapshotWithoutSystemMessage(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("owner_live_left")
+	member := api.register("member_live_left")
+	roomCard := api.createRoom(owner.Token, map[string]any{"name": "Live Left", "join_policy": "open"})
+	roomID := roomCard["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	ownerStream := api.connectStream(owner.User["id"].(string))
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "left_stream_member",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	updated := ownerStream.await("room_updated")
+	snap := updated["snapshot"].(roomSnapshot)
+	if snap.LiveParticipantCount != 1 {
+		t.Fatalf("live join should update room live count: %+v", snap)
+	}
+	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "加入了房间" {
+		t.Fatalf("live join should not replace last_message with a system message: %+v", snap.LastMessage)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", member.Token, map[string]any{
+		"connection_state": "left",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	updated = ownerStream.await("room_updated")
+	snap = updated["snapshot"].(roomSnapshot)
+	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "加入了房间" {
+		t.Fatalf("live leave should not replace last_message with a system message: %+v", snap.LastMessage)
+	}
+	if snap.LiveParticipantCount != 0 {
+		t.Fatalf("left live participants should not count in room snapshot: %+v", snap)
 	}
 }
 

@@ -29,7 +29,7 @@ func (h *Handler) listMessages(c *gin.Context) {
 			        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key
 			 FROM messages m
 			 JOIN users u ON u.id = m.sender_user_id
-			 WHERE m.room_id = ?
+			 WHERE m.room_id = ? AND `+visibleMessageSQL("m")+`
 			 ORDER BY m.created_at DESC
 			 LIMIT ?`,
 			roomID, limit,
@@ -50,7 +50,7 @@ func (h *Handler) listMessages(c *gin.Context) {
 				        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key
 				 FROM messages m
 				 JOIN users u ON u.id = m.sender_user_id
-				 WHERE m.room_id = ? AND m.created_at < ?
+				 WHERE m.room_id = ? AND m.created_at < ? AND `+visibleMessageSQL("m")+`
 				 ORDER BY m.created_at DESC
 				 LIMIT ?`,
 				roomID, beforeCreatedAt, limit,
@@ -80,7 +80,11 @@ func (h *Handler) listMessages(c *gin.Context) {
 		firstID := messages[0].ID
 		firstCreatedAt := parseRFC3339Millis(messages[0].CreatedAt)
 		var count int
-		_ = h.DB.QueryRow(`SELECT COUNT(*) FROM messages WHERE room_id = ? AND created_at < ?`, roomID, firstCreatedAt).Scan(&count)
+		_ = h.DB.QueryRow(
+			`SELECT COUNT(*) FROM messages m WHERE m.room_id = ? AND m.created_at < ? AND `+visibleMessageSQL("m"),
+			roomID,
+			firstCreatedAt,
+		).Scan(&count)
 		hasMore = count > 0
 		if hasMore {
 			nextBefore = &firstID

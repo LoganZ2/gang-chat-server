@@ -12,6 +12,21 @@ const (
 	systemEventRoomRoleChanged   = "room_role_changed"
 )
 
+func visibleMessageSQL(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return `NOT (` + prefix + `type = 'system'
+		AND EXISTS (
+			SELECT 1
+			FROM json_each(` + prefix + `attachments_json) attachment
+			WHERE lower(COALESCE(json_extract(attachment.value, '$.type'), '')) = 'system'
+			  AND lower(COALESCE(json_extract(attachment.value, '$.event'), '')) IN ('live_joined', 'live_left')
+		)
+	)`
+}
+
 type systemMessageSpec struct {
 	Event    string
 	UserID   string

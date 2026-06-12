@@ -51,13 +51,6 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 			h.jsonError(c, http.StatusNotFound, "not_found", "live participant not found")
 			return
 		}
-		if err := h.appendSystemMessage(roomID, systemMessageSpec{
-			Event:  systemEventLiveLeft,
-			UserID: targetID,
-		}); err != nil {
-			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room message")
-			return
-		}
 		h.publishRoomUpdated(roomID)
 
 	case "mute_mic":
@@ -115,6 +108,10 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 // target is actually in the live session.
 func (h *Handler) isLiveParticipant(roomID, userID string) bool {
 	var count int
-	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&count)
+	_ = h.DB.QueryRow(
+		`SELECT COUNT(*) FROM live_participants WHERE room_id = ? AND user_id = ? AND connection_state != 'left'`,
+		roomID,
+		userID,
+	).Scan(&count)
 	return count > 0
 }
