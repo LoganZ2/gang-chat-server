@@ -140,6 +140,45 @@ func TestStreamRejectionNotifiesApplicantApplications(t *testing.T) {
 	applicantStream.expectSilent()
 }
 
+func TestStreamInviteAcceptanceRefreshesPendingJoinRequests(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("owner_invite_approve")
+	applicant := api.register("applicant_invite_approve")
+
+	room := api.createRoom(owner.Token, map[string]any{"name": "Invite Approval", "join_policy": "approval_required"})
+	roomID := room["id"].(string)
+
+	ownerStream := api.connectStream(owner.User["id"].(string))
+
+	status, resp := api.request(http.MethodPost, "/rooms/"+roomID+"/join", applicant.Token, map[string]any{
+		"reason": "Applying first",
+	})
+	api.requireStatus(status, http.StatusAccepted, resp)
+	created := ownerStream.await("room_join_requests_updated")
+	if created["room_id"] != roomID {
+		t.Fatalf("join request update for wrong room: %v", created)
+	}
+
+	status, resp = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": applicant.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, resp)
+	inviteID := resp["invite"].(map[string]any)["id"].(string)
+
+	status, resp = api.request(http.MethodPatch, "/room-invites/"+inviteID, applicant.Token, map[string]any{"decision": "accept"})
+	api.requireStatus(status, http.StatusOK, resp)
+
+	updated := ownerStream.await("room_join_requests_updated")
+	if updated["room_id"] != roomID {
+		t.Fatalf("join request update for wrong room after invite acceptance: %v", updated)
+	}
+	status, resp = api.request(http.MethodGet, "/rooms/"+roomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, resp)
+	if got := len(resp["requests"].([]any)); got != 0 {
+		t.Fatalf("invite acceptance should clear pending join request, got %d: %v", got, resp)
+	}
+}
+
 func TestStreamLeaveNotifiesBothSides(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("owner_leave")

@@ -514,13 +514,30 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	var alreadyMember int
 	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&alreadyMember)
 	if alreadyMember > 0 {
-		_, _ = h.DB.Exec(`UPDATE room_invites SET status = 'accepted', updated_at = ? WHERE room_id = ? AND target_user_id = ? AND status = 'pending'`, nowMillis(), roomID, userID)
+		now := nowMillis()
+		_, _ = h.DB.Exec(`UPDATE room_invites SET status = 'accepted', updated_at = ? WHERE room_id = ? AND target_user_id = ? AND status = 'pending'`, now, roomID, userID)
+		joinRequestUpdated := false
+		if res, err := h.DB.Exec(
+			`UPDATE join_requests
+			 SET status = 'approved', updated_at = ?, reviewer_user_id = NULL, reviewed_at = ?
+			 WHERE room_id = ? AND user_id = ? AND status = 'pending'`,
+			now, now, roomID, userID,
+		); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "save room invite decision failed")
+			return
+		} else if n, _ := res.RowsAffected(); n > 0 {
+			joinRequestUpdated = true
+		}
 		detail, err := h.buildRoomDetail(roomID, userID)
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
 			return
 		}
 		h.publishRoomInvitesUpdated(userID)
+		if joinRequestUpdated {
+			h.publishRoomApplicationsUpdated(userID)
+			h.publishRoomJoinRequestsUpdated(roomID)
+		}
 		c.JSON(http.StatusOK, gin.H{"ok": true, "room": detail, "invite": h.roomInvitePayload(inviteID, userID)})
 		return
 	}
@@ -604,12 +621,18 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	if inviterIsAdmin {
 		reviewerID = inviterID
 	}
-	_, _ = tx.Exec(
+	joinRequestUpdated := false
+	if res, err := tx.Exec(
 		`UPDATE join_requests
 		 SET status = 'approved', updated_at = ?, reviewer_user_id = ?, reviewed_at = ?
 		 WHERE room_id = ? AND user_id = ? AND status = 'pending'`,
 		now, reviewerID, now, roomID, userID,
-	)
+	); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save room invite decision failed")
+		return
+	} else if n, _ := res.RowsAffected(); n > 0 {
+		joinRequestUpdated = true
+	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save room invite decision failed")
 		return
@@ -624,6 +647,9 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	h.publishRoomUpdated(roomID, userID)
 	h.publishRoomInvitesUpdated(userID)
 	h.publishRoomApplicationsUpdated(userID)
+	if joinRequestUpdated {
+		h.publishRoomJoinRequestsUpdated(roomID)
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "room": detail, "invite": h.roomInvitePayload(inviteID, userID)})
 }
 

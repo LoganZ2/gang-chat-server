@@ -165,6 +165,7 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		var createdAt int64
 		_ = h.DB.QueryRow(`SELECT id, status, created_at FROM join_requests WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&requestID, &status, &createdAt)
 		h.publishRoomApplicationsUpdated(userID)
+		h.publishRoomJoinRequestsUpdated(roomID)
 		c.JSON(http.StatusAccepted, gin.H{"join_request": gin.H{"id": requestID, "room_id": roomID, "status": status, "reason": reason, "created_at": formatMillis(createdAt)}})
 		return
 	}
