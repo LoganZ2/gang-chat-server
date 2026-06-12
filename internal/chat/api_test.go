@@ -316,6 +316,22 @@ func (h *apiHarness) sendMessage(token, roomID, body string) map[string]any {
 	return message
 }
 
+func (h *apiHarness) sendTypedMessage(token, roomID, messageType, body string, attachments []any) map[string]any {
+	h.t.Helper()
+	status, response := h.request(http.MethodPost, "/rooms/"+roomID+"/messages", token, map[string]any{
+		"client_message_id": "test_msg_" + idgen.New("client"),
+		"type":              messageType,
+		"body":              body,
+		"attachments":       attachments,
+	})
+	h.requireStatus(status, http.StatusCreated, response)
+	message, ok := response["message"].(map[string]any)
+	if !ok {
+		h.t.Fatalf("send typed message response missing message: %v", response)
+	}
+	return message
+}
+
 func parseNumericID(t *testing.T, value any) int64 {
 	t.Helper()
 	raw, ok := value.(string)
@@ -364,6 +380,22 @@ func findMessage(t *testing.T, response map[string]any, messageID string) map[st
 		}
 	}
 	t.Fatalf("message %s not found in response: %v", messageID, response)
+	return nil
+}
+
+func roomCardByID(t *testing.T, response map[string]any, roomID string) map[string]any {
+	t.Helper()
+	items, ok := response["rooms"].([]any)
+	if !ok {
+		t.Fatalf("rooms response missing rooms: %v", response)
+	}
+	for _, item := range items {
+		room, ok := item.(map[string]any)
+		if ok && room["id"] == roomID {
+			return room
+		}
+	}
+	t.Fatalf("room %s not found in response: %v", roomID, response)
 	return nil
 }
 
@@ -495,6 +527,80 @@ func TestUTF8JSONRoundTripAndHeaders(t *testing.T) {
 	if message["body"] != "你好，世界" {
 		t.Fatalf("message body should preserve UTF-8 Chinese: %v", message)
 	}
+}
+
+func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("last_preview_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Preview Room", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	assertLastPreview := func(want string) {
+		t.Helper()
+		status, response := api.request(http.MethodGet, "/rooms", owner.Token, nil)
+		api.requireStatus(status, http.StatusOK, response)
+		room := roomCardByID(t, response, roomID)
+		last := room["last_message"].(map[string]any)
+		if last["body_preview"] != want {
+			t.Fatalf("last_message preview mismatch: got %v want %s room=%v", last["body_preview"], want, room)
+		}
+	}
+
+	api.sendTypedMessage(owner.Token, roomID, "audio", "voice_1.m4a", []any{
+		map[string]any{
+			"type": "audio",
+			"name": "voice_1.m4a",
+			"asset": map[string]any{
+				"id":        "asset_voice",
+				"url":       "/assets/voice_1.m4a",
+				"mime_type": "audio/mp4",
+				"filename":  "voice_1.m4a",
+			},
+		},
+	})
+	assertLastPreview("[语音]")
+
+	api.sendTypedMessage(owner.Token, roomID, "file", "screenshot.png", []any{
+		map[string]any{
+			"type": "file",
+			"name": "screenshot.png",
+			"asset": map[string]any{
+				"id":        "asset_image",
+				"url":       "/assets/screenshot.png",
+				"mime_type": "image/png",
+				"filename":  "screenshot.png",
+			},
+		},
+	})
+	assertLastPreview("[图片] screenshot.png")
+
+	api.sendTypedMessage(owner.Token, roomID, "file", "report.pdf", []any{
+		map[string]any{
+			"type": "file",
+			"name": "report.pdf",
+			"asset": map[string]any{
+				"id":        "asset_file",
+				"url":       "/assets/report.pdf",
+				"mime_type": "application/pdf",
+				"filename":  "report.pdf",
+			},
+		},
+	})
+	assertLastPreview("[文件] report.pdf")
+
+	api.sendTypedMessage(owner.Token, roomID, "sticker", "[wave]", []any{
+		map[string]any{
+			"type": "sticker",
+			"name": "wave",
+			"asset": map[string]any{
+				"id":        "asset_sticker",
+				"url":       "/assets/wave.webp",
+				"mime_type": "image/webp",
+				"filename":  "wave.webp",
+			},
+		},
+	})
+	assertLastPreview("[表情] wave")
 }
 
 func TestAttachmentDispositionUsesUTF8FilenameStar(t *testing.T) {

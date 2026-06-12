@@ -263,6 +263,24 @@ func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "hello world" {
 		t.Fatalf("room_updated should carry the new last_message: %+v", snap.LastMessage)
 	}
+
+	api.sendTypedMessage(owner.Token, roomID, "audio", "voice_1.m4a", []any{
+		map[string]any{
+			"type": "audio",
+			"name": "voice_1.m4a",
+			"asset": map[string]any{
+				"id":        "asset_voice",
+				"url":       "/assets/voice_1.m4a",
+				"mime_type": "audio/mp4",
+				"filename":  "voice_1.m4a",
+			},
+		},
+	})
+	updated = ownerStream.await("room_updated")
+	snap = updated["snapshot"].(roomSnapshot)
+	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "[语音]" {
+		t.Fatalf("room_updated should label voice last_message: %+v", snap.LastMessage)
+	}
 }
 
 func TestStreamDeleteRoomNotifiesMembers(t *testing.T) {

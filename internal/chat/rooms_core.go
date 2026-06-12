@@ -541,17 +541,17 @@ func (h *Handler) livePreview(roomID string) ([]userSummary, int, error) {
 }
 
 func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
-	var id, sender, body string
+	var id, sender, messageType, body, attachmentsJSON string
 	var createdAt int64
 	err := h.DB.QueryRow(
-		`SELECT m.id, u.username, m.body, m.created_at
+		`SELECT m.id, u.username, m.type, m.body, m.attachments_json, m.created_at
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
 		 WHERE m.room_id = ?
 		 ORDER BY m.created_at DESC
 		 LIMIT 1`,
 		roomID,
-	).Scan(&id, &sender, &body, &createdAt)
+	).Scan(&id, &sender, &messageType, &body, &attachmentsJSON, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -561,9 +561,124 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 	return &lastMessagePreview{
 		ID:                id,
 		SenderDisplayName: sender,
-		BodyPreview:       preview(body, 80),
+		BodyPreview:       lastMessageBodyPreview(messageType, body, attachmentsJSON),
 		CreatedAt:         formatMillis(createdAt),
 	}, nil
+}
+
+func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
+	attachments := decodeJSONArray(attachmentsJSON)
+	hasAudio := messageType == "audio"
+	hasImage := false
+	hasFile := messageType == "file"
+	hasNonImageFile := false
+	imageName := ""
+	fileName := ""
+	stickerName := ""
+	for _, raw := range attachments {
+		attachment, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		attachmentType := strings.ToLower(stringFromMap(attachment, "type"))
+		mimeType := strings.ToLower(attachmentMimeType(attachment))
+		displayName := attachmentDisplayName(attachment)
+		if attachmentType == "audio" || strings.HasPrefix(mimeType, "audio/") {
+			hasAudio = true
+		}
+		if attachmentType == "sticker" && stickerName == "" {
+			stickerName = displayName
+		}
+		if attachmentType == "file" {
+			hasFile = true
+			if strings.HasPrefix(mimeType, "image/") {
+				hasImage = true
+				if imageName == "" {
+					imageName = displayName
+				}
+			} else {
+				hasNonImageFile = true
+				if fileName == "" {
+					fileName = displayName
+				}
+			}
+		}
+	}
+	if hasAudio {
+		return "[语音]"
+	}
+	if messageType == "sticker" || stickerName != "" {
+		return labelledLastMessagePreview("[表情]", firstNonEmptyString(stickerName, stickerNameFromBody(body)))
+	}
+	if hasFile {
+		if hasImage && !hasNonImageFile {
+			return labelledLastMessagePreview("[图片]", firstNonEmptyString(imageName, body))
+		}
+		return labelledLastMessagePreview("[文件]", firstNonEmptyString(fileName, imageName, body))
+	}
+	return preview(body, 80)
+}
+
+func labelledLastMessagePreview(label, name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return label
+	}
+	return preview(label+" "+name, 80)
+}
+
+func stickerNameFromBody(body string) string {
+	trimmed := strings.TrimSpace(body)
+	if strings.HasPrefix(trimmed, "[表情]") {
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, "[表情]"))
+	}
+	if strings.HasPrefix(trimmed, "[") && strings.Contains(trimmed, "]") {
+		end := strings.Index(trimmed, "]")
+		return strings.TrimSpace(trimmed[1:end])
+	}
+	return trimmed
+}
+
+func attachmentDisplayName(attachment map[string]any) string {
+	if name := stringFromMap(attachment, "name"); name != "" {
+		return name
+	}
+	if filename := stringFromMap(attachment, "filename"); filename != "" {
+		return filename
+	}
+	asset, ok := attachment["asset"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return stringFromMap(asset, "filename")
+}
+
+func attachmentMimeType(attachment map[string]any) string {
+	if mimeType := stringFromMap(attachment, "mime_type"); mimeType != "" {
+		return mimeType
+	}
+	asset, ok := attachment["asset"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return stringFromMap(asset, "mime_type")
+}
+
+func stringFromMap(values map[string]any, key string) string {
+	value, ok := values[key].(string)
+	if !ok {
+		return ""
+	}
+	return value
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (h *Handler) unreadCount(roomID, userID string) int {
