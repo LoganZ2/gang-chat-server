@@ -820,6 +820,7 @@ func TestSuperuserCanSeeAndJoinPrivateRooms(t *testing.T) {
 
 func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 	api := newAPIHarness(t)
+	super := api.login("GANG", "64n9-Ch47")
 	owner := api.register("search_all_owner")
 	member := api.register("search_all_member")
 
@@ -836,8 +837,16 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 		"name":       "Alpha Private",
 		"visibility": "private",
 	})
+	descriptionOnlyRoom := api.createRoom(owner.Token, map[string]any{
+		"name":        "Neutral Room",
+		"description": "Alpha descriptiononlyneedle",
+		"join_policy": "open",
+	})
+	descriptionOnlyRoomID := descriptionOnlyRoom["id"].(string)
 
 	status, response := api.request(http.MethodPost, "/rooms/"+teamRoomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+descriptionOnlyRoomID+"/join", member.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	api.sendMessage(owner.Token, teamRoomID, "Alpha roadmap is ready")
 	status, response = api.request(http.MethodPost, "/rooms/"+teamRoomID+"/messages", owner.Token, map[string]any{
@@ -925,6 +934,18 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 	fileHit := files[0].(map[string]any)
 	if fileHit["room"].(map[string]any)["id"] != teamRoomID || fileHit["message"].(map[string]any)["type"] != "file" {
 		t.Fatalf("search file hit should include room context and file message: %v", fileHit)
+	}
+
+	status, response = api.request(http.MethodGet, "/search?q=descriptiononlyneedle&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["my_rooms"].([]any)); got != 0 {
+		t.Fatalf("my room search should not match room description, got %d: %v", got, response)
+	}
+
+	status, response = api.request(http.MethodGet, "/search?q=descriptiononlyneedle&limit=5", super.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["my_rooms"].([]any)); got != 0 {
+		t.Fatalf("superuser room search should not match room description, got %d: %v", got, response)
 	}
 
 	status, response = api.request(http.MethodGet, "/search?q=image&limit=5", member.Token, nil)

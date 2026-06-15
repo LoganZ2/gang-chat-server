@@ -59,10 +59,9 @@ func (h *Handler) searchMyRooms(userID, query string, limit int) ([]roomCard, er
 			 FROM rooms r
 			 WHERE r.rid = ?
 			    OR instr(lower(r.name), lower(?)) > 0
-			    OR instr(lower(r.description), lower(?)) > 0
 			 ORDER BY r.updated_at DESC, r.created_at DESC
 			 LIMIT ?`,
-			query, query, query, limit,
+			query, query, limit,
 		)
 	} else {
 		rows, err = h.DB.Query(
@@ -76,13 +75,12 @@ func (h *Handler) searchMyRooms(userID, query string, limit int) ([]roomCard, er
 			   AND (
 			     r.rid = ?
 			     OR instr(lower(r.name), lower(?)) > 0
-			     OR instr(lower(r.description), lower(?)) > 0
 			     OR instr(lower(COALESCE(rm.remark_name, '')), lower(?)) > 0
 			     OR instr(lower(COALESCE(rm.room_display_name, '')), lower(?)) > 0
 			   )
 			 ORDER BY r.updated_at DESC, rm.joined_at DESC
 			 LIMIT ?`,
-			userID, query, query, query, query, query, limit,
+			userID, query, query, query, query, limit,
 		)
 	}
 	if err != nil {
