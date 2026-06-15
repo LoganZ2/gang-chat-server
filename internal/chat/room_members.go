@@ -1264,7 +1264,8 @@ func (h *Handler) joinRequestSourcePayload(roomID, targetUserID string, requestC
 }
 
 func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
-	var id, roomID, status, inviterID, inviterUID, inviterUsername string
+	var id, roomID, status, inviterID string
+	var inviterUserID, inviterUID, inviterUsername sql.NullString
 	var inviterDisplayName, inviterAvatarURL, inviterDefaultAvatar, inviterRoomDisplayName, inviterRoomRole sql.NullString
 	var rid, name, defaultAvatar, visibility, joinPolicy string
 	var avatarURL, roomDescription, roomCreatedByUserID sql.NullString
@@ -1272,6 +1273,7 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 	var roomExists int
 	err := h.DB.QueryRow(
 		`SELECT ri.id, ri.room_id, ri.status, ri.created_at, ri.updated_at,
+		        ri.inviter_user_id,
 		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
 		        irm.room_display_name, irm.role,
 		        COALESCE(r.rid, ri.room_rid),
@@ -1284,24 +1286,38 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 		        r.created_by_user_id,
 		        CASE WHEN r.id IS NULL THEN 0 ELSE 1 END
 		 FROM room_invites ri
-		 JOIN users u ON u.id = ri.inviter_user_id
+		 LEFT JOIN users u ON u.id = ri.inviter_user_id
 		 LEFT JOIN rooms r ON r.id = ri.room_id
 		 LEFT JOIN room_memberships irm ON irm.room_id = ri.room_id AND irm.user_id = ri.inviter_user_id
 		 WHERE ri.id = ?`,
 		inviteID,
 	).Scan(
 		&id, &roomID, &status, &createdAt, &updatedAt,
-		&inviterID, &inviterUID, &inviterUsername, &inviterDisplayName, &inviterAvatarURL, &inviterDefaultAvatar,
+		&inviterID,
+		&inviterUserID, &inviterUID, &inviterUsername, &inviterDisplayName, &inviterAvatarURL, &inviterDefaultAvatar,
 		&inviterRoomDisplayName, &inviterRoomRole,
 		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy, &roomDescription, &roomCreatedByUserID, &roomExists,
 	)
 	if err != nil {
 		return gin.H{"id": inviteID}
 	}
+	inviterExists := inviterUserID.Valid && inviterUsername.Valid
+	inviterSummaryID := inviterID
+	inviterSummaryUID := ""
+	inviterSummaryUsername := ""
+	if inviterExists {
+		inviterSummaryID = inviterUserID.String
+		inviterSummaryUID = inviterUID.String
+		inviterSummaryUsername = inviterUsername.String
+	} else {
+		inviterDisplayName = sql.NullString{String: "用户不存在", Valid: true}
+		inviterAvatarURL = sql.NullString{}
+		inviterDefaultAvatar = sql.NullString{String: "graphite-2", Valid: true}
+	}
 	inviter := summaryFromUserFields(
-		inviterID,
-		inviterUID,
-		inviterUsername,
+		inviterSummaryID,
+		inviterSummaryUID,
+		inviterSummaryUsername,
 		inviterDisplayName,
 		inviterAvatarURL,
 		inviterDefaultAvatar,
@@ -1322,6 +1338,7 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 	return gin.H{
 		"id": id, "status": status, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
 		"room_exists": roomExists != 0, "invalid_reason": nullableStringFromText(invalidReason),
+		"inviter_exists": inviterExists,
 		"room": h.roomNotificationRoomPayload(
 			roomID, viewerID, rid, name, defaultAvatar, visibility, joinPolicy,
 			avatarURL, roomDescription, roomCreatedByUserID, roomExists != 0,
@@ -1392,7 +1409,7 @@ func (h *Handler) isPrivilegedRoomInviter(roomID, userID string) bool {
 func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 	var id, roomID, status, reason string
 	var createdAt, updatedAt int64
-	var reviewerID, reviewerUID, reviewerUsername sql.NullString
+	var reviewerRefID, reviewerUserID, reviewerUID, reviewerUsername sql.NullString
 	var reviewerDisplayName, reviewerAvatarURL, reviewerDefaultAvatar, reviewerRoomDisplayName, reviewerRoomRole sql.NullString
 	var reviewedAt sql.NullInt64
 	var rid, name, defaultAvatar, visibility, joinPolicy string
@@ -1412,8 +1429,8 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 		requestID, viewerID,
 	).Scan(
 		&id, &roomID, &status, &reason, &createdAt, &updatedAt,
-		&reviewerID, &reviewedAt,
-		&reviewerID, &reviewerUID, &reviewerUsername, &reviewerDisplayName, &reviewerAvatarURL, &reviewerDefaultAvatar,
+		&reviewerRefID, &reviewedAt,
+		&reviewerUserID, &reviewerUID, &reviewerUsername, &reviewerDisplayName, &reviewerAvatarURL, &reviewerDefaultAvatar,
 		&reviewerRoomDisplayName, &reviewerRoomRole,
 		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy, &roomDescription, &roomCreatedByUserID,
 	)
@@ -1422,11 +1439,25 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 	}
 
 	var reviewer any
-	if reviewerID.Valid && reviewerID.String != "" && reviewerUsername.Valid {
+	reviewerExists := true
+	if reviewerRefID.Valid && reviewerRefID.String != "" {
+		reviewerExists = reviewerUserID.Valid && reviewerUsername.Valid
+		reviewerSummaryID := reviewerRefID.String
+		reviewerSummaryUID := ""
+		reviewerSummaryUsername := ""
+		if reviewerExists {
+			reviewerSummaryID = reviewerUserID.String
+			reviewerSummaryUID = reviewerUID.String
+			reviewerSummaryUsername = reviewerUsername.String
+		} else {
+			reviewerDisplayName = sql.NullString{String: "用户不存在", Valid: true}
+			reviewerAvatarURL = sql.NullString{}
+			reviewerDefaultAvatar = sql.NullString{String: "graphite-2", Valid: true}
+		}
 		summary := summaryFromUserFields(
-			reviewerID.String,
-			reviewerUID.String,
-			reviewerUsername.String,
+			reviewerSummaryID,
+			reviewerSummaryUID,
+			reviewerSummaryUsername,
 			reviewerDisplayName,
 			reviewerAvatarURL,
 			reviewerDefaultAvatar,
@@ -1434,7 +1465,7 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 		summary.RoomDisplayName = nullableString(reviewerRoomDisplayName)
 		if reviewerRoomRole.Valid && reviewerRoomRole.String != "" {
 			summary.RoomRole = reviewerRoomRole.String
-		} else if h.isSuperuser(reviewerID.String) {
+		} else if h.isSuperuser(reviewerRefID.String) {
 			summary.RoomRole = "superuser"
 		}
 		reviewer = summary
@@ -1442,7 +1473,8 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 
 	return gin.H{
 		"id": id, "status": status, "reason": reason, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
-		"reviewed_at": nullableMillis(reviewedAt),
+		"reviewed_at":     nullableMillis(reviewedAt),
+		"reviewer_exists": reviewerExists,
 		"room": h.roomNotificationRoomPayload(
 			roomID, viewerID, rid, name, defaultAvatar, visibility, joinPolicy,
 			avatarURL, roomDescription, roomCreatedByUserID, true,

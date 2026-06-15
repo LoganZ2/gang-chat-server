@@ -361,6 +361,9 @@ func assertRoomInvitesKeepDeletedRooms(t *testing.T, pool *sql.DB) {
 		if tableName == "rooms" && from == "room_id" {
 			t.Fatalf("room_invites.room_id must not cascade with rooms, on_delete=%s", onDelete)
 		}
+		if tableName == "users" && from == "inviter_user_id" {
+			t.Fatalf("room_invites.inviter_user_id must not cascade with users, on_delete=%s", onDelete)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate room_invites foreign keys: %v", err)
@@ -2311,6 +2314,8 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("application_owner")
 	joiner := api.register("application_joiner")
+	adminReviewer := api.register("app_deleted_reviewer")
+	deletedReviewerJoiner := api.register("app_deleted_joiner")
 	room := api.createRoom(owner.Token, map[string]any{"name": "Application Room", "description": "Application room bio"})
 	roomID := room["id"].(string)
 
@@ -2393,6 +2398,45 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	if _, ok := approvedRoom["personal_profile"].(map[string]any); !ok {
 		t.Fatalf("approved application room should include viewer room profile: %v", approvedRoom)
 	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": adminReviewer.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	adminInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+adminInviteID, adminReviewer.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+adminReviewer.User["id"].(string), owner.Token, map[string]any{
+		"role": "admin",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", deletedReviewerJoiner.Token, nil)
+	api.requireStatus(status, http.StatusAccepted, response)
+	deletedReviewerRequestID := response["join_request"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+deletedReviewerRequestID, adminReviewer.Token, map[string]any{
+		"decision": "approve",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodDelete, "/users/me/account", adminReviewer.Token, map[string]any{
+		"confirm": true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-applications?status=all", deletedReviewerJoiner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	applications = response["applications"].([]any)
+	if len(applications) != 1 || applications[0].(map[string]any)["id"] != deletedReviewerRequestID {
+		t.Fatalf("application reviewed by deleted reviewer should remain listed: %v", response)
+	}
+	application = applications[0].(map[string]any)
+	if application["reviewer_exists"] != false {
+		t.Fatalf("deleted reviewer application should mark reviewer missing: %v", application)
+	}
+	deletedReviewer := application["reviewer"].(map[string]any)
+	if deletedReviewer["display_name"] != "用户不存在" || deletedReviewer["avatar_url"] != nil {
+		t.Fatalf("deleted reviewer summary should be a placeholder: %v", deletedReviewer)
+	}
 }
 
 func TestRoomInviteFlow(t *testing.T) {
@@ -2410,6 +2454,8 @@ func TestRoomInviteFlow(t *testing.T) {
 	openTarget := api.register("invite_open_target")
 	leftInviter := api.register("invite_left_inviter")
 	leftTarget := api.register("invite_left_target")
+	deletedInviter := api.register("invite_deleted_inviter")
+	deletedInviterTarget := api.register("invite_deleted_inviter_target")
 	deletedRoomTarget := api.register("invite_deleted_room_target")
 	superTarget := api.register("invite_super_target")
 	closedRoom := api.createRoom(owner.Token, map[string]any{"name": "Closed Invite Room", "join_policy": "closed"})
@@ -2715,6 +2761,39 @@ func TestRoomInviteFlow(t *testing.T) {
 		"decision": "accept",
 	})
 	api.requireStatus(status, http.StatusConflict, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": deletedInviter.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	deletedInviterJoinInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+deletedInviterJoinInviteID, deletedInviter.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", deletedInviter.Token, map[string]any{
+		"user_id": deletedInviterTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	deletedInviterInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodDelete, "/users/me/account", deletedInviter.Token, map[string]any{
+		"confirm": true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", deletedInviterTarget.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	invites = response["invites"].([]any)
+	if len(invites) != 1 || invites[0].(map[string]any)["id"] != deletedInviterInviteID {
+		t.Fatalf("pending invite from deleted inviter should remain listed: %v", response)
+	}
+	deletedInviterInvite := invites[0].(map[string]any)
+	if deletedInviterInvite["inviter_exists"] != false || deletedInviterInvite["invalid_reason"] != "inviter_left" {
+		t.Fatalf("deleted inviter invite should be invalid with missing inviter state: %v", deletedInviterInvite)
+	}
+	deletedInviterSummary := deletedInviterInvite["inviter"].(map[string]any)
+	if deletedInviterSummary["display_name"] != "用户不存在" || deletedInviterSummary["avatar_url"] != nil {
+		t.Fatalf("deleted inviter summary should be a placeholder: %v", deletedInviterSummary)
+	}
 
 	deletedRoom := api.createRoom(owner.Token, map[string]any{"name": "Deleted Invite Room", "join_policy": "approval_required"})
 	deletedRoomID := deletedRoom["id"].(string)
