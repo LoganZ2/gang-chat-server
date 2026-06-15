@@ -129,9 +129,9 @@ func systemMessageBody(spec systemMessageSpec, actorName string) string {
 		}
 		return "被 " + actorName + " 踢出了房间"
 	case systemEventLiveJoined:
-		return "进入了直播间"
+		return "进入了语音频道"
 	case systemEventLiveLeft:
-		return "退出了直播间"
+		return "退出了语音频道"
 	case systemEventRoomRoleChanged:
 		if spec.FromRole == "owner" && spec.ToRole == "admin" {
 			return "降职为管理员"
