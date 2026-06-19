@@ -1277,7 +1277,7 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	status, response = api.request(http.MethodPost, "/rooms/"+room2ID+"/join", alice.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 
-	if _, err := api.db.Exec(`UPDATE users SET bio = ? WHERE id = ?`, "Ships quietly", alice.User["id"].(string)); err != nil {
+	if _, err := api.db.Exec(`UPDATE users SET bio = ?, gender = ? WHERE id = ?`, "Ships quietly", "female", alice.User["id"].(string)); err != nil {
 		t.Fatalf("update alice bio: %v", err)
 	}
 	if _, err := api.db.Exec(
@@ -1295,6 +1295,9 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	user := profile["user"].(map[string]any)
 	if user["bio"] != "Ships quietly" {
 		t.Fatalf("profile should include signature: %v", profile)
+	}
+	if user["gender"] != "female" {
+		t.Fatalf("profile should include gender: %v", profile)
 	}
 	if user["is_online"] != true {
 		t.Fatalf("profile should include online state: %v", profile)
@@ -1314,7 +1317,7 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	status, response = api.request(http.MethodGet, "/users/"+alice.User["id"].(string)+"/profile", viewer.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	user = response["profile"].(map[string]any)["user"].(map[string]any)
-	if user["bio"] != "Ships quietly" || user["is_online"] != true {
+	if user["bio"] != "Ships quietly" || user["gender"] != "female" || user["is_online"] != true {
 		t.Fatalf("global profile should include latest user state: %v", user)
 	}
 	commonRooms = user["common_rooms"].([]any)

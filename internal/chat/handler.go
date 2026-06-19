@@ -32,6 +32,7 @@ type userSummary struct {
 	UID              string           `json:"uid,omitempty"`
 	Username         string           `json:"username"`
 	DisplayName      string           `json:"display_name"`
+	Gender           string           `json:"gender,omitempty"`
 	AvatarURL        *string          `json:"avatar_url"`
 	DefaultAvatarKey string           `json:"default_avatar_key"`
 	RoomDisplayName  *string          `json:"room_display_name,omitempty"`
@@ -292,18 +293,21 @@ func (h *Handler) userSummary(userID string) (userSummary, error) {
 
 func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, error) {
 	var id, uid, username string
-	var displayName, avatarURL, defaultAvatar, bio sql.NullString
+	var displayName, avatarURL, defaultAvatar, bio, gender sql.NullString
 	var isSuperuser int
 	err := h.DB.QueryRow(
-		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, bio, is_superuser
+		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, bio, gender, is_superuser
 		 FROM users WHERE id = ? AND status = 'active'`,
 		userID,
-	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &bio, &isSuperuser)
+	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &bio, &gender, &isSuperuser)
 	if err != nil {
 		return userSummary{}, err
 	}
 	summary := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
 	summary.Bio = nullableString(bio)
+	if gender.Valid {
+		summary.Gender = gender.String
+	}
 	summary.IsSuperuser = isSuperuser != 0
 	isOnline := h.isUserOnlineForViewer(id, viewerID)
 	summary.IsOnline = &isOnline
