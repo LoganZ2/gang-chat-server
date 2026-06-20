@@ -328,7 +328,7 @@ func (h *Handler) issueScreenAudioToken(c *gin.Context) {
 	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
-	auxIdentity := userID + "#screen-audio"
+	auxIdentity := userID + "--screen-audio"
 	canPublish := !h.isVoiceBanned(roomID, userID)
 	token, expiresAt, err := h.screenAudioToken(roomID, userID, auxIdentity, canPublish)
 	if err != nil {
