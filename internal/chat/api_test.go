@@ -38,10 +38,11 @@ type apiHarness struct {
 // fakeLiveController records the LiveKit media-control calls moderation makes,
 // so tests can assert the server drove the media session (not just the DB).
 type fakeLiveController struct {
-	removed    []string // "room/identity"
-	publishSet []string // "room/identity=true|false"
-	micMuted   []string // "room/identity=true|false"
-	removeErr  error
+	removed      []string // "room/identity"
+	publishSet   []string // "room/identity=true|false"
+	subscribeSet []string // "room/identity=true|false"
+	micMuted     []string // "room/identity=true|false"
+	removeErr    error
 }
 
 func (f *fakeLiveController) RemoveParticipant(room, identity string) error {
@@ -51,6 +52,11 @@ func (f *fakeLiveController) RemoveParticipant(room, identity string) error {
 
 func (f *fakeLiveController) SetCanPublish(room, identity string, canPublish bool) error {
 	f.publishSet = append(f.publishSet, room+"/"+identity+"="+strconv.FormatBool(canPublish))
+	return nil
+}
+
+func (f *fakeLiveController) SetCanSubscribe(room, identity string, canSubscribe bool) error {
+	f.subscribeSet = append(f.subscribeSet, room+"/"+identity+"="+strconv.FormatBool(canSubscribe))
 	return nil
 }
 
@@ -1800,12 +1806,40 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		"source":                 "live_panel",
 	})
 	api.requireStatus(status, http.StatusOK, response)
+	memberKey := roomID + "/" + member.User["id"].(string)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
+		"action": "mute_mic",
+		"reason": "mic test",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if !contains(api.live.publishSet, memberKey+"=false") {
+		t.Fatalf("mute_mic should revoke publish on LiveKit: %v", api.live.publishSet)
+	}
+	if !contains(api.live.micMuted, memberKey+"=true") {
+		t.Fatalf("mute_mic should server-mute the mic on LiveKit: %v", api.live.micMuted)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	live := response["live"].(map[string]any)
+	participant := participantByUserID(t, live, member.User["id"].(string))
+	if participant["mic_muted"] != true || participant["mic_blocked"] != true || participant["headphones_blocked"] != false {
+		t.Fatalf("mute_mic should force only the microphone: %v", participant)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
+		"action": "restore_voice",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if !contains(api.live.publishSet, memberKey+"=true") {
+		t.Fatalf("restore_voice should re-grant publish after mute_mic: %v", api.live.publishSet)
+	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", member.Token, map[string]any{
 		"headphones_muted": true,
 	})
 	api.requireStatus(status, http.StatusOK, response)
-	participant := response["participant"].(map[string]any)
+	participant = response["participant"].(map[string]any)
 	if participant["headphones_muted"] != true {
 		t.Fatalf("headphones should be muted: %v", participant)
 	}
@@ -1817,10 +1851,12 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 
 	// block_voice must drive the LiveKit media session, not just the DB: revoke
-	// publish and server-side mute the mic.
-	memberKey := roomID + "/" + member.User["id"].(string)
+	// publish + subscribe and server-side mute the mic.
 	if !contains(api.live.publishSet, memberKey+"=false") {
 		t.Fatalf("block_voice should revoke publish on LiveKit: %v", api.live.publishSet)
+	}
+	if !contains(api.live.subscribeSet, memberKey+"=false") {
+		t.Fatalf("block_voice should revoke subscribe on LiveKit: %v", api.live.subscribeSet)
 	}
 	if !contains(api.live.micMuted, memberKey+"=true") {
 		t.Fatalf("block_voice should server-mute the mic on LiveKit: %v", api.live.micMuted)
@@ -1828,9 +1864,11 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
-	live := response["live"].(map[string]any)
+	live = response["live"].(map[string]any)
 	participant = participantByUserID(t, live, member.User["id"].(string))
-	if participant["mic_muted"] != true || participant["headphones_muted"] != true || participant["voice_blocked"] != true {
+	if participant["mic_muted"] != true || participant["mic_blocked"] != true ||
+		participant["headphones_muted"] != true || participant["headphones_blocked"] != true ||
+		participant["headphones_listening"] != false || participant["voice_blocked"] != true {
 		t.Fatalf("voice block should force mic and headphones off: %v", participant)
 	}
 
@@ -1840,8 +1878,26 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	participant = response["participant"].(map[string]any)
-	if participant["mic_muted"] != true || participant["headphones_muted"] != true || participant["voice_blocked"] != true {
+	if participant["mic_muted"] != true || participant["mic_blocked"] != true ||
+		participant["headphones_muted"] != true || participant["headphones_blocked"] != true ||
+		participant["voice_blocked"] != true {
 		t.Fatalf("voice blocked user should not be able to unmute: %v", participant)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
+		"action": "restore_headphones",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if !contains(api.live.subscribeSet, memberKey+"=true") {
+		t.Fatalf("restore_headphones should re-grant subscribe on LiveKit: %v", api.live.subscribeSet)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	live = response["live"].(map[string]any)
+	participant = participantByUserID(t, live, member.User["id"].(string))
+	if participant["mic_blocked"] != true || participant["headphones_blocked"] != false ||
+		participant["headphones_muted"] != false || participant["headphones_listening"] != true {
+		t.Fatalf("restore_headphones should leave mic blocked but restore listening: %v", participant)
 	}
 
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
@@ -1851,12 +1907,16 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	if !contains(api.live.publishSet, memberKey+"=true") {
 		t.Fatalf("restore_voice should re-grant publish on LiveKit: %v", api.live.publishSet)
 	}
+	if !contains(api.live.subscribeSet, memberKey+"=true") {
+		t.Fatalf("restore_voice should re-grant subscribe on LiveKit: %v", api.live.subscribeSet)
+	}
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", member.Token, map[string]any{
 		"headphones_muted": false,
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	participant = response["participant"].(map[string]any)
-	if participant["voice_blocked"] != false || participant["headphones_muted"] != false {
+	if participant["voice_blocked"] != false || participant["mic_blocked"] != false ||
+		participant["headphones_blocked"] != false || participant["headphones_muted"] != false {
 		t.Fatalf("voice restore should allow headphones again: %v", participant)
 	}
 
@@ -1876,7 +1936,8 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	participant = response["participant"].(map[string]any)
-	if participant["voice_blocked"] != true || participant["mic_muted"] != true {
+	if participant["voice_blocked"] != true || participant["mic_blocked"] != true ||
+		participant["headphones_blocked"] != true || participant["mic_muted"] != true {
 		t.Fatalf("voice ban should persist across rejoin: %v", participant)
 	}
 }

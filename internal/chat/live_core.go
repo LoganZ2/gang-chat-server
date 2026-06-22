@@ -58,8 +58,9 @@ func (h *Handler) joinLive(c *gin.Context) {
 	_, err := h.DB.Exec(
 		`INSERT INTO live_participants (
 		   live_session_id, room_id, user_id, client_live_session_id, joined_at, updated_at,
-		   mic_muted, headphones_muted, voice_blocked, camera_on, screen_sharing, connection_state
-		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 'joining')
+		   mic_muted, mic_blocked, headphones_muted, headphones_blocked,
+		   voice_blocked, camera_on, screen_sharing, connection_state
+		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 'joining')
 		 ON CONFLICT(room_id, user_id) DO UPDATE SET
 		   client_live_session_id = excluded.client_live_session_id,
 		   updated_at = excluded.updated_at,
@@ -76,7 +77,9 @@ func (h *Handler) joinLive(c *gin.Context) {
 	if h.isVoiceBanned(roomID, userID) {
 		_, _ = h.DB.Exec(
 			`UPDATE live_participants
-			 SET mic_muted = 1, headphones_muted = 1, voice_blocked = 1, updated_at = ?
+			 SET mic_muted = 1, mic_blocked = 1,
+			     headphones_muted = 1, headphones_blocked = 1,
+			     voice_blocked = 1, updated_at = ?
 			 WHERE room_id = ? AND user_id = ?`,
 			now, roomID, userID,
 		)
@@ -160,28 +163,37 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 		*req.ConnectionState == "left" &&
 		previousConnectionState != "left"
 
-	var voiceBlocked int
+	var micBlocked, headphonesBlocked int
+	_ = h.DB.QueryRow(
+		`SELECT mic_blocked, headphones_blocked FROM live_participants WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		userID,
+	).Scan(&micBlocked, &headphonesBlocked)
 	if h.isVoiceBanned(roomID, userID) {
-		voiceBlocked = 1
+		micBlocked = 1
 	}
 
 	sets := []string{"updated_at = ?"}
 	args := []any{nowMillis()}
 	if req.MicMuted != nil {
 		sets = append(sets, "mic_muted = ?")
-		args = append(args, boolToInt(*req.MicMuted || voiceBlocked != 0))
+		args = append(args, boolToInt(*req.MicMuted || micBlocked != 0))
 	}
 	if req.HeadphonesMuted != nil {
 		sets = append(sets, "headphones_muted = ?")
-		args = append(args, boolToInt(*req.HeadphonesMuted || voiceBlocked != 0))
+		args = append(args, boolToInt(*req.HeadphonesMuted || headphonesBlocked != 0))
 	}
-	if voiceBlocked != 0 {
+	if micBlocked != 0 {
 		if req.MicMuted == nil {
 			sets = append(sets, "mic_muted = 1")
 		}
+		sets = append(sets, "mic_blocked = 1", "voice_blocked = 1")
+	}
+	if headphonesBlocked != 0 {
 		if req.HeadphonesMuted == nil {
 			sets = append(sets, "headphones_muted = 1")
 		}
+		sets = append(sets, "headphones_blocked = 1")
 	}
 	if req.CameraOn != nil {
 		sets = append(sets, "camera_on = ?")
@@ -228,8 +240,10 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 
 func (h *Handler) buildLiveState(roomID string, fallbackUpdatedAt int64) (liveState, error) {
 	rows, err := h.DB.Query(
-		`SELECT lp.live_session_id, lp.joined_at, lp.updated_at, lp.mic_muted,
-		        lp.headphones_muted, lp.voice_blocked, lp.camera_on,
+		`SELECT lp.live_session_id, lp.joined_at, lp.updated_at,
+		        lp.mic_muted, lp.mic_blocked,
+		        lp.headphones_muted, lp.headphones_blocked,
+		        lp.voice_blocked, lp.camera_on,
 		        lp.screen_sharing, lp.connection_state, u.id, u.uid, u.username,
 		        u.display_name, u.avatar_url, u.default_avatar_key
 		 FROM live_participants lp
@@ -265,8 +279,10 @@ func (h *Handler) buildLiveState(roomID string, fallbackUpdatedAt int64) (liveSt
 
 func (h *Handler) liveParticipantForUser(roomID, userID string) (liveParticipant, error) {
 	row := h.DB.QueryRow(
-		`SELECT lp.live_session_id, lp.joined_at, lp.updated_at, lp.mic_muted,
-		        lp.headphones_muted, lp.voice_blocked, lp.camera_on,
+		`SELECT lp.live_session_id, lp.joined_at, lp.updated_at,
+		        lp.mic_muted, lp.mic_blocked,
+		        lp.headphones_muted, lp.headphones_blocked,
+		        lp.voice_blocked, lp.camera_on,
 		        lp.screen_sharing, lp.connection_state, u.id, u.uid, u.username,
 		        u.display_name, u.avatar_url, u.default_avatar_key
 		 FROM live_participants lp
@@ -298,17 +314,18 @@ func (h *Handler) liveKitToken(roomID, userID string) (string, time.Time, error)
 }
 
 func (h *Handler) liveKitMediaPermissions(roomID, userID string) (bool, bool) {
-	var headphonesMuted int
+	var micBlocked, headphonesMuted, headphonesBlocked int
 	_ = h.DB.QueryRow(
-		`SELECT headphones_muted FROM live_participants WHERE room_id = ? AND user_id = ?`,
+		`SELECT mic_blocked, headphones_muted, headphones_blocked
+		 FROM live_participants WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
-	).Scan(&headphonesMuted)
+	).Scan(&micBlocked, &headphonesMuted, &headphonesBlocked)
 	// A voice ban is persistent and room-scoped (room_voice_bans), so it's the
 	// authority on whether this user may publish — not the easily-reset
 	// participant row.
 	voiceBlocked := h.isVoiceBanned(roomID, userID)
-	canPublish := !voiceBlocked
-	canSubscribe := !voiceBlocked && headphonesMuted == 0
+	canPublish := !voiceBlocked && micBlocked == 0
+	canSubscribe := headphonesBlocked == 0 && headphonesMuted == 0
 	return canPublish, canSubscribe
 }
 

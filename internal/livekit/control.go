@@ -82,6 +82,35 @@ func (c *Controller) SetCanPublish(room, identity string, canPublish bool) error
 	return err
 }
 
+// SetCanSubscribe flips a participant's subscribe permission live. This is the
+// enforcement primitive for admin "isolate headphones": the target stays in
+// the room but cannot receive other participants' media until restored.
+func (c *Controller) SetCanSubscribe(room, identity string, canSubscribe bool) error {
+	if c == nil {
+		return nil
+	}
+	ctx, cancel := c.ctx()
+	defer cancel()
+	info, err := c.rooms.GetParticipant(ctx, &livekit.RoomParticipantIdentity{
+		Room:     room,
+		Identity: identity,
+	})
+	if err != nil {
+		return err
+	}
+	perm := info.GetPermission()
+	if perm == nil {
+		perm = &livekit.ParticipantPermission{CanPublish: true}
+	}
+	perm.CanSubscribe = canSubscribe
+	_, err = c.rooms.UpdateParticipant(ctx, &livekit.UpdateParticipantRequest{
+		Room:       room,
+		Identity:   identity,
+		Permission: perm,
+	})
+	return err
+}
+
 // MuteMicrophone server-side mutes (or unmutes) a participant's microphone
 // track. Unlike a client-driven mute this cannot be undone by the target;
 // it's the enforcement primitive behind admin "mute mic".

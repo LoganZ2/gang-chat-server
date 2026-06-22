@@ -186,7 +186,9 @@ type liveParticipant struct {
 	User                userSummary `json:"user"`
 	JoinedAt            string      `json:"joined_at"`
 	MicMuted            bool        `json:"mic_muted"`
+	MicBlocked          bool        `json:"mic_blocked"`
 	HeadphonesMuted     bool        `json:"headphones_muted"`
+	HeadphonesBlocked   bool        `json:"headphones_blocked"`
 	HeadphonesListening bool        `json:"headphones_listening"`
 	VoiceBlocked        bool        `json:"voice_blocked"`
 	CameraOn            bool        `json:"camera_on"`
@@ -529,13 +531,15 @@ func scanLiveParticipant(row scanner) (liveParticipant, int64, error) {
 	var userID, uid, username string
 	var displayName, avatarURL, defaultAvatar sql.NullString
 	var joinedAt, updatedAt int64
-	var micMuted, headphonesMuted, voiceBlocked, cameraOn, screenSharing int
+	var micMuted, micBlocked, headphonesMuted, headphonesBlocked, voiceBlocked, cameraOn, screenSharing int
 	err := row.Scan(
 		&participant.LiveSessionID,
 		&joinedAt,
 		&updatedAt,
 		&micMuted,
+		&micBlocked,
 		&headphonesMuted,
+		&headphonesBlocked,
 		&voiceBlocked,
 		&cameraOn,
 		&screenSharing,
@@ -553,9 +557,11 @@ func scanLiveParticipant(row scanner) (liveParticipant, int64, error) {
 	participant.User = summaryFromUserFields(userID, uid, username, displayName, avatarURL, defaultAvatar)
 	participant.JoinedAt = formatMillis(joinedAt)
 	participant.MicMuted = micMuted != 0
+	participant.MicBlocked = micBlocked != 0
 	participant.HeadphonesMuted = headphonesMuted != 0
+	participant.HeadphonesBlocked = headphonesBlocked != 0
 	participant.VoiceBlocked = voiceBlocked != 0
-	participant.HeadphonesListening = !participant.HeadphonesMuted && !participant.VoiceBlocked
+	participant.HeadphonesListening = !participant.HeadphonesMuted && !participant.HeadphonesBlocked
 	participant.CameraOn = cameraOn != 0
 	participant.ScreenSharing = screenSharing != 0
 	return participant, updatedAt, nil

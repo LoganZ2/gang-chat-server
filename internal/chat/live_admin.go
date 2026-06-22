@@ -10,7 +10,7 @@ import (
 // participant. Each action now drives the LiveKit media session through
 // h.Live so it takes effect immediately, instead of only flipping a DB flag
 // and waiting for the client to comply or the token to expire. The DB writes
-// remain as the projection clients read over SSE, plus — for voice bans — a
+// remain as the projection clients read over SSE, plus, for voice bans, a
 // persistent policy that outlives the live session (see room_voice_bans).
 //
 // When h.Live is nil (dev mode without LiveKit credentials, or tests) the SDK
@@ -23,7 +23,7 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		return
 	}
 	var req liveModerationRequest
-	if err := c.ShouldBindJSON(&req); err != nil || !allowed(req.Action, "kick", "mute_mic", "block_voice", "restore_voice") {
+	if err := c.ShouldBindJSON(&req); err != nil || !allowed(req.Action, "kick", "mute_mic", "block_voice", "restore_voice", "restore_headphones") {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid live moderation action")
 		return
 	}
@@ -54,11 +54,20 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		h.publishRoomUpdated(roomID)
 
 	case "mute_mic":
+		if err := h.Live.SetCanPublish(roomID, targetID, false); err != nil {
+			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to block microphone publishing")
+			return
+		}
 		if err := h.Live.MuteMicrophone(roomID, targetID, true); err != nil {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to mute microphone")
 			return
 		}
-		_, _ = h.DB.Exec(`UPDATE live_participants SET mic_muted = 1, updated_at = ? WHERE room_id = ? AND user_id = ?`, nowMillis(), roomID, targetID)
+		_, _ = h.DB.Exec(
+			`UPDATE live_participants
+			 SET mic_muted = 1, mic_blocked = 1, voice_blocked = 1, updated_at = ?
+			 WHERE room_id = ? AND user_id = ?`,
+			nowMillis(), roomID, targetID,
+		)
 
 	case "block_voice":
 		// Revoke publish on the live session first so it stops immediately,
@@ -66,6 +75,10 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		// project onto the participant row clients render.
 		if err := h.Live.SetCanPublish(roomID, targetID, false); err != nil {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to block voice")
+			return
+		}
+		if err := h.Live.SetCanSubscribe(roomID, targetID, false); err != nil {
+			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to isolate headphones")
 			return
 		}
 		_ = h.Live.MuteMicrophone(roomID, targetID, true)
@@ -81,7 +94,9 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		)
 		_, _ = h.DB.Exec(
 			`UPDATE live_participants
-			 SET mic_muted = 1, headphones_muted = 1, voice_blocked = 1, updated_at = ?
+			 SET mic_muted = 1, mic_blocked = 1,
+			     headphones_muted = 1, headphones_blocked = 1,
+			     voice_blocked = 1, updated_at = ?
 			 WHERE room_id = ? AND user_id = ?`,
 			now, roomID, targetID,
 		)
@@ -91,8 +106,35 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to restore voice")
 			return
 		}
+		if err := h.Live.SetCanSubscribe(roomID, targetID, true); err != nil {
+			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to restore headphones")
+			return
+		}
+		if err := h.Live.MuteMicrophone(roomID, targetID, false); err != nil {
+			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to unmute microphone")
+			return
+		}
 		_, _ = h.DB.Exec(`DELETE FROM room_voice_bans WHERE room_id = ? AND user_id = ?`, roomID, targetID)
-		_, _ = h.DB.Exec(`UPDATE live_participants SET voice_blocked = 0, updated_at = ? WHERE room_id = ? AND user_id = ?`, nowMillis(), roomID, targetID)
+		_, _ = h.DB.Exec(
+			`UPDATE live_participants
+			 SET mic_muted = 0, mic_blocked = 0,
+			     headphones_muted = 0, headphones_blocked = 0,
+			     voice_blocked = 0, updated_at = ?
+			 WHERE room_id = ? AND user_id = ?`,
+			nowMillis(), roomID, targetID,
+		)
+
+	case "restore_headphones":
+		if err := h.Live.SetCanSubscribe(roomID, targetID, true); err != nil {
+			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to restore headphones")
+			return
+		}
+		_, _ = h.DB.Exec(
+			`UPDATE live_participants
+			 SET headphones_muted = 0, headphones_blocked = 0, updated_at = ?
+			 WHERE room_id = ? AND user_id = ?`,
+			nowMillis(), roomID, targetID,
+		)
 	}
 
 	h.PublishLiveSnapshot(roomID, "live_participant_moderated", map[string]any{

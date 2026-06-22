@@ -18,6 +18,7 @@ import (
 type liveMediaController interface {
 	RemoveParticipant(room, identity string) error
 	SetCanPublish(room, identity string, canPublish bool) error
+	SetCanSubscribe(room, identity string, canSubscribe bool) error
 	MuteMicrophone(room, identity string, muted bool) error
 }
 
@@ -25,9 +26,10 @@ type liveMediaController interface {
 // without touching a LiveKit session.
 type noopLiveController struct{}
 
-func (noopLiveController) RemoveParticipant(string, string) error    { return nil }
-func (noopLiveController) SetCanPublish(string, string, bool) error  { return nil }
-func (noopLiveController) MuteMicrophone(string, string, bool) error { return nil }
+func (noopLiveController) RemoveParticipant(string, string) error     { return nil }
+func (noopLiveController) SetCanPublish(string, string, bool) error   { return nil }
+func (noopLiveController) SetCanSubscribe(string, string, bool) error { return nil }
+func (noopLiveController) MuteMicrophone(string, string, bool) error  { return nil }
 
 type Handler struct {
 	DB       *sql.DB
