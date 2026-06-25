@@ -99,6 +99,17 @@ func (h *Handler) isTextMuted(roomID, userID string) bool {
 	return mutedUntil.Valid && (mutedUntil.Int64 == 0 || mutedUntil.Int64 > nowMillis())
 }
 
+func (h *Handler) roomMessagesBlocked(roomID, userID string) bool {
+	var notificationLevel string
+	if err := h.DB.QueryRow(
+		`SELECT notification_level FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&notificationLevel); err != nil {
+		return false
+	}
+	return notificationLevel == "blocked"
+}
+
 func (h *Handler) joinState(roomID, userID string, joined bool) string {
 	if joined {
 		return "joined"

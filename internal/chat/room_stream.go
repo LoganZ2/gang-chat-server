@@ -37,6 +37,7 @@ type roomSnapshot struct {
 	ID                          string              `json:"id"`
 	RID                         string              `json:"rid,omitempty"`
 	Name                        string              `json:"name"`
+	RemarkName                  *string             `json:"remark_name,omitempty"`
 	Description                 string              `json:"description"`
 	AvatarURL                   *string             `json:"avatar_url"`
 	DefaultAvatarKey            string              `json:"default_avatar_key"`
@@ -46,6 +47,8 @@ type roomSnapshot struct {
 	AIVoiceAnnouncementsEnabled bool                `json:"ai_voice_announcements_enabled"`
 	MessageRecallPolicy         string              `json:"message_recall_policy,omitempty"`
 	MessageRecallWindowSeconds  *int64              `json:"message_recall_window_seconds"`
+	NotificationPolicy          string              `json:"notification_policy,omitempty"`
+	IsPinned                    bool                `json:"is_pinned"`
 	MemberCount                 int                 `json:"member_count"`
 	OnlineMemberCount           int                 `json:"online_member_count"`
 	LiveParticipantCount        int                 `json:"live_participant_count"`
@@ -146,6 +149,7 @@ func (h *Handler) publishRoomToUser(userID, roomID, eventType string) {
 	if err != nil {
 		return
 	}
+	h.applyRoomSnapshotPersonalFields(&snapshot, roomID, userID)
 	h.Bus.PublishUser(userID, eventbus.Event{
 		Type:   eventType,
 		RoomID: roomID,
@@ -153,10 +157,41 @@ func (h *Handler) publishRoomToUser(userID, roomID, eventType string) {
 	})
 }
 
+func (h *Handler) applyRoomSnapshotPersonalFields(snapshot *roomSnapshot, roomID, userID string) {
+	if snapshot == nil || roomID == "" || userID == "" {
+		return
+	}
+	var remarkName sql.NullString
+	var notificationPolicy string
+	var isPinned int
+	if err := h.DB.QueryRow(
+		`SELECT remark_name, notification_level, is_pinned
+		 FROM room_memberships
+		 WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&remarkName, &notificationPolicy, &isPinned); err != nil {
+		return
+	}
+	snapshot.RemarkName = nullableString(remarkName)
+	snapshot.NotificationPolicy = notificationPolicy
+	snapshot.IsPinned = isPinned != 0
+	if notificationPolicy == "blocked" {
+		snapshot.LastMessage = nil
+	}
+}
+
 // publishRoomUpdated rebuilds the snapshot once and pushes a room_updated to
 // every current member of roomID, skipping any userID in exclude (used when a
 // member who just got their own room_added shouldn't also get room_updated).
 func (h *Handler) publishRoomUpdated(roomID string, exclude ...string) {
+	h.publishRoomUpdatedWithOptions(roomID, false, exclude...)
+}
+
+func (h *Handler) publishRoomMessageUpdated(roomID string, exclude ...string) {
+	h.publishRoomUpdatedWithOptions(roomID, true, exclude...)
+}
+
+func (h *Handler) publishRoomUpdatedWithOptions(roomID string, skipBlockedMessages bool, exclude ...string) {
 	if h == nil || h.Bus == nil || roomID == "" {
 		return
 	}
@@ -178,6 +213,9 @@ func (h *Handler) publishRoomUpdated(roomID string, exclude ...string) {
 	ev := eventbus.Event{Type: "room_updated", RoomID: roomID, Data: snapshot}
 	for _, userID := range members {
 		if _, ok := skip[userID]; ok {
+			continue
+		}
+		if skipBlockedMessages && h.roomMessagesBlocked(roomID, userID) {
 			continue
 		}
 		h.Bus.PublishUser(userID, ev)

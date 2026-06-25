@@ -15,6 +15,11 @@ func (h *Handler) listMessages(c *gin.Context) {
 	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
+	userID := currentUserID(c)
+	if h.roomMessagesBlocked(roomID, userID) {
+		c.JSON(http.StatusOK, gin.H{"messages": []message{}, "has_more": false, "next_before": nil})
+		return
+	}
 	limit := parseLimit(c.Query("limit"), 50, 100)
 
 	var rows *sql.Rows
@@ -175,7 +180,8 @@ func (h *Handler) sendMessage(c *gin.Context) {
 	// last_message lives in the room-list snapshot, so a new message refreshes
 	// every member's list entry. Clients use the new last_message to bump their
 	// own unread counter; the count itself is never on the wire (it's personal).
-	h.publishRoomUpdated(roomID)
+	h.publishRoomMessageUpdated(roomID, userID)
+	h.publishRoomToUser(userID, roomID, "room_updated")
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"message": msg})
 }
 
@@ -183,6 +189,10 @@ func (h *Handler) markRead(c *gin.Context) {
 	roomID := c.Param("room_id")
 	userID := currentUserID(c)
 	if !h.requireRoomAccess(c, roomID) {
+		return
+	}
+	if h.roomMessagesBlocked(roomID, userID) {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "unread_count": 0})
 		return
 	}
 

@@ -84,6 +84,7 @@ type roomCard struct {
 	MyRole               string              `json:"my_role,omitempty"`
 	NotificationLevel    string              `json:"notification_level,omitempty"`
 	NotificationPolicy   string              `json:"notification_policy,omitempty"`
+	IsPinned             bool                `json:"is_pinned"`
 	OnlineMemberCount    int                 `json:"online_member_count"`
 	LiveParticipantCount int                 `json:"live_participant_count"`
 	LiveAvatarPreview    []userSummary       `json:"live_avatar_preview"`
@@ -112,6 +113,7 @@ type searchRoomContext struct {
 	ID               string  `json:"id"`
 	RID              string  `json:"rid,omitempty"`
 	Name             string  `json:"name"`
+	RemarkName       *string `json:"remark_name,omitempty"`
 	AvatarURL        *string `json:"avatar_url"`
 	DefaultAvatarKey string  `json:"default_avatar_key"`
 }
@@ -129,6 +131,7 @@ type roomMembership struct {
 	RoomAvatarURL        *string `json:"room_avatar_url"`
 	RoomDefaultAvatarKey *string `json:"room_default_avatar_key"`
 	NotificationLevel    string  `json:"notification_level,omitempty"`
+	IsPinned             bool    `json:"is_pinned"`
 }
 
 type roomPersonalProfile struct {
@@ -155,6 +158,7 @@ type roomDetail struct {
 	CreatedBy                   *userSummary        `json:"created_by"`
 	RemarkName                  *string             `json:"remark_name"`
 	NotificationPolicy          string              `json:"notification_policy,omitempty"`
+	IsPinned                    bool                `json:"is_pinned"`
 	PersonalProfile             roomPersonalProfile `json:"personal_profile"`
 	CanDeleteRoom               bool                `json:"can_delete_room"`
 	MyMembership                roomMembership      `json:"my_membership"`
@@ -707,6 +711,21 @@ func allowed(value string, values ...string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeRoomNotificationPolicy(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "all":
+		return "all", true
+	case "silent", "quiet", "no_alert", "no_alerts", "receive_silent",
+		"mention", "mentions", "only_mentions", "mention_only",
+		"mute", "muted", "do_not_disturb", "dnd":
+		return "silent", true
+	case "block", "blocked", "ignore", "ignored":
+		return "blocked", true
+	default:
+		return "", false
+	}
 }
 
 func preview(value string, maxRunes int) string {

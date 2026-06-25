@@ -80,10 +80,10 @@ func (h *Handler) listRooms(c *gin.Context) {
 			 FROM rooms r
 			 JOIN room_memberships rm ON rm.room_id = r.id
 			 WHERE rm.user_id = ?
-			 ORDER BY (
+			 ORDER BY rm.is_pinned DESC, (
 			   SELECT COUNT(*) FROM live_participants lp
 			   WHERE lp.room_id = r.id AND lp.connection_state != 'left'
-			 ) = 0, COALESCE(`+latestMessageTimeSQL+`, r.updated_at) DESC, rm.joined_at DESC, r.id DESC
+			 ) = 0, COALESCE(CASE WHEN rm.notification_level = 'blocked' THEN NULL ELSE `+latestMessageTimeSQL+` END, r.updated_at) DESC, rm.joined_at DESC, r.id DESC
 			 LIMIT ? OFFSET ?`,
 			userID, fetch, offset,
 		)
@@ -338,19 +338,23 @@ func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error)
 	if err != nil {
 		return roomCard{}, err
 	}
+	var role, notificationLevel string
+	var remarkName sql.NullString
+	var isPinned int
+	_ = h.DB.QueryRow(
+		`SELECT role, notification_level, remark_name, is_pinned FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+		rec.ID, userID,
+	).Scan(&role, &notificationLevel, &remarkName, &isPinned)
+	if role == "" && h.isSuperuser(userID) {
+		role = "superuser"
+		notificationLevel = "all"
+	}
 	lastMessage, err := h.lastMessage(rec.ID)
 	if err != nil {
 		return roomCard{}, err
 	}
-	var role, notificationLevel string
-	var remarkName sql.NullString
-	_ = h.DB.QueryRow(
-		`SELECT role, notification_level, remark_name FROM room_memberships WHERE room_id = ? AND user_id = ?`,
-		rec.ID, userID,
-	).Scan(&role, &notificationLevel, &remarkName)
-	if role == "" && h.isSuperuser(userID) {
-		role = "superuser"
-		notificationLevel = "all"
+	if notificationLevel == "blocked" {
+		lastMessage = nil
 	}
 	return roomCard{
 		ID:                   rec.ID,
@@ -366,6 +370,7 @@ func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error)
 		MyRole:               role,
 		NotificationLevel:    notificationLevel,
 		NotificationPolicy:   notificationLevel,
+		IsPinned:             isPinned != 0,
 		OnlineMemberCount:    onlineMemberCount,
 		LiveParticipantCount: liveCount,
 		LiveAvatarPreview:    livePreview,
@@ -379,6 +384,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 	var rec roomRecord
 	var joinedAt int64
 	var role, notificationLevel string
+	var isPinned int
 	var remarkName, roomDisplayName, roomAvatarURL, roomDefaultAvatarKey sql.NullString
 	err := h.DB.QueryRow(
 		`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
@@ -386,7 +392,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		        r.message_recall_policy, r.message_recall_window_seconds,
 		        r.description, r.created_at, r.updated_at,
 		        rm.role, rm.remark_name, rm.room_display_name, rm.room_avatar_url,
-		        rm.room_default_avatar_key, rm.notification_level, rm.joined_at
+		        rm.room_default_avatar_key, rm.notification_level, rm.is_pinned, rm.joined_at
 		 FROM rooms r
 		 JOIN room_memberships rm ON rm.room_id = r.id
 		 WHERE r.id = ? AND rm.user_id = ?`,
@@ -395,7 +401,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		&rec.ID, &rec.RID, &rec.Name, &rec.AvatarURL, &rec.DefaultAvatarKey, &rec.CreatedByUserID,
 		&rec.Visibility, &rec.JoinPolicy, &rec.AIVoiceAnnounceEnabled, &rec.MessageRecallPolicy,
 		&rec.MessageRecallWindowSeconds, &rec.Description, &rec.CreatedAt, &rec.UpdatedAt,
-		&role, &remarkName, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatarKey, &notificationLevel, &joinedAt,
+		&role, &remarkName, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatarKey, &notificationLevel, &isPinned, &joinedAt,
 	)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) || !h.isSuperuser(userID) {
@@ -461,6 +467,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		CreatedBy:                   createdBy,
 		RemarkName:                  nullableString(remarkName),
 		NotificationPolicy:          notificationLevel,
+		IsPinned:                    isPinned != 0,
 		PersonalProfile: roomPersonalProfile{
 			DisplayName:      nullableString(roomDisplayName),
 			AvatarURL:        nullableString(roomAvatarURL),
@@ -475,6 +482,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 			RoomAvatarURL:        nullableString(roomAvatarURL),
 			RoomDefaultAvatarKey: nullableString(roomDefaultAvatarKey),
 			NotificationLevel:    notificationLevel,
+			IsPinned:             isPinned != 0,
 		},
 		Live:      live,
 		CreatedAt: formatMillis(rec.CreatedAt),
@@ -533,9 +541,11 @@ func (h *Handler) onlineMemberCount(roomID string) (int, error) {
 
 func (h *Handler) livePreview(roomID string) ([]userSummary, int, error) {
 	rows, err := h.DB.Query(
-		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key
+		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        rm.room_display_name, rm.role
 		 FROM live_participants lp
 		 JOIN users u ON u.id = lp.user_id
+		 LEFT JOIN room_memberships rm ON rm.room_id = lp.room_id AND rm.user_id = lp.user_id
 		 WHERE lp.room_id = ?
 		   AND lp.connection_state != 'left'
 		 ORDER BY lp.joined_at ASC`,
@@ -551,11 +561,17 @@ func (h *Handler) livePreview(roomID string) ([]userSummary, int, error) {
 	for rows.Next() {
 		var id, uid, username string
 		var displayName, avatarURL, defaultAvatar sql.NullString
-		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar); err != nil {
+		var roomDisplayName, roomRole sql.NullString
+		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &roomDisplayName, &roomRole); err != nil {
 			return nil, 0, err
 		}
 		if len(preview) < 5 {
-			preview = append(preview, summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar))
+			user := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+			user.RoomDisplayName = nullableString(roomDisplayName)
+			if roomRole.Valid && roomRole.String != "" {
+				user.RoomRole = roomRole.String
+			}
+			preview = append(preview, user)
 		}
 		count++
 	}
@@ -745,6 +761,15 @@ func firstNonEmptyString(values ...string) string {
 }
 
 func (h *Handler) unreadCount(roomID, userID string) int {
+	var notificationLevel string
+	_ = h.DB.QueryRow(
+		`SELECT notification_level FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&notificationLevel)
+	if notificationLevel == "blocked" {
+		return 0
+	}
+
 	var readAt int64
 	_ = h.DB.QueryRow(
 		`SELECT m.created_at

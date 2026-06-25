@@ -124,12 +124,21 @@ func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 		notificationField = "notification_policy"
 	}
 	if notificationPolicy != nil {
-		if !allowed(*notificationPolicy, "all", "mentions", "muted") {
+		normalizedNotificationPolicy, ok := normalizeRoomNotificationPolicy(*notificationPolicy)
+		if !ok {
 			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid "+notificationField)
 			return
 		}
 		sets = append(sets, "notification_level = ?")
-		args = append(args, *notificationPolicy)
+		args = append(args, normalizedNotificationPolicy)
+	}
+	isPinned := req.IsPinned
+	if isPinned == nil {
+		isPinned = req.Pinned
+	}
+	if isPinned != nil {
+		sets = append(sets, "is_pinned = ?")
+		args = append(args, boolToInt(*isPinned))
 	}
 	avatarAssetID := req.RoomAvatarAssetID
 	if avatarAssetID == nil {
@@ -171,6 +180,7 @@ func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
 		return
 	}
+	h.publishRoomToUser(userID, roomID, "room_updated")
 	c.JSON(http.StatusOK, gin.H{"settings": h.myRoomSettingsPayload(roomID, userID), "room": detail})
 }
 
@@ -1380,16 +1390,17 @@ func (h *Handler) roomSettingsPayload(roomID string) gin.H {
 func (h *Handler) myRoomSettingsPayload(roomID, userID string) gin.H {
 	var remark, display, avatarURL, defaultAvatar sql.NullString
 	var notification string
+	var isPinned int
 	_ = h.DB.QueryRow(
-		`SELECT remark_name, room_display_name, room_avatar_url, room_default_avatar_key, notification_level
+		`SELECT remark_name, room_display_name, room_avatar_url, room_default_avatar_key, notification_level, is_pinned
 		 FROM room_memberships WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
-	).Scan(&remark, &display, &avatarURL, &defaultAvatar, &notification)
+	).Scan(&remark, &display, &avatarURL, &defaultAvatar, &notification, &isPinned)
 	return gin.H{
 		"remark_name": nullableString(remark), "room_display_name": nullableString(display),
 		"room_avatar_asset_id": nil, "room_avatar_url": nullableString(avatarURL),
 		"room_default_avatar_key": nullableString(defaultAvatar), "notification_level": notification,
-		"notification_policy": notification,
+		"notification_policy": notification, "is_pinned": isPinned != 0,
 	}
 }
 
@@ -1816,13 +1827,14 @@ func (h *Handler) roomViewerMembershipPayload(roomID, userID string) (roomPerson
 	var role, notificationLevel string
 	var remarkName, roomDisplayName, roomAvatarURL, roomDefaultAvatarKey sql.NullString
 	var joinedAt int64
+	var isPinned int
 	err := h.DB.QueryRow(
 		`SELECT role, notification_level, remark_name, room_display_name, room_avatar_url,
-		        room_default_avatar_key, joined_at
+		        room_default_avatar_key, is_pinned, joined_at
 		 FROM room_memberships
 		 WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
-	).Scan(&role, &notificationLevel, &remarkName, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatarKey, &joinedAt)
+	).Scan(&role, &notificationLevel, &remarkName, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatarKey, &isPinned, &joinedAt)
 	if err != nil {
 		return roomPersonalProfile{}, roomMembership{}, false
 	}
@@ -1839,6 +1851,7 @@ func (h *Handler) roomViewerMembershipPayload(roomID, userID string) (roomPerson
 			RoomAvatarURL:        nullableString(roomAvatarURL),
 			RoomDefaultAvatarKey: nullableString(roomDefaultAvatarKey),
 			NotificationLevel:    notificationLevel,
+			IsPinned:             isPinned != 0,
 		}, true
 }
 

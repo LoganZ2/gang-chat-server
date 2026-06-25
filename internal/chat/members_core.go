@@ -56,7 +56,7 @@ func (h *Handler) listMembers(c *gin.Context) {
 	if curJoinedAt, curUserID, ok := decodeMemberCursor(c.Query("cursor")); ok {
 		rows, err = h.DB.Query(
 			`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
-			        rm.role, rm.text_muted_until, rm.joined_at
+			        rm.role, rm.text_muted_until, rm.joined_at, rm.room_display_name
 			 FROM room_memberships rm
 			 JOIN users u ON u.id = rm.user_id
 			 WHERE rm.room_id = ?
@@ -68,7 +68,7 @@ func (h *Handler) listMembers(c *gin.Context) {
 	} else {
 		rows, err = h.DB.Query(
 			`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
-			        rm.role, rm.text_muted_until, rm.joined_at
+			        rm.role, rm.text_muted_until, rm.joined_at, rm.room_display_name
 			 FROM room_memberships rm
 			 JOIN users u ON u.id = rm.user_id
 			 WHERE rm.room_id = ?
@@ -91,7 +91,8 @@ func (h *Handler) listMembers(c *gin.Context) {
 		var role string
 		var textMutedUntil sql.NullInt64
 		var joinedAt int64
-		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &role, &textMutedUntil, &joinedAt); err != nil {
+		var roomDisplayName sql.NullString
+		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &role, &textMutedUntil, &joinedAt, &roomDisplayName); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read members")
 			return
 		}
@@ -101,6 +102,8 @@ func (h *Handler) listMembers(c *gin.Context) {
 			mutedUntil = &v
 		}
 		user := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+		user.RoomDisplayName = nullableString(roomDisplayName)
+		user.RoomRole = role
 		isOnline := h.isUserOnlineForViewer(id, viewerID)
 		user.IsOnline = &isOnline
 		members = append(members, currentMember{

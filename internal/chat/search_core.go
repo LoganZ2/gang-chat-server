@@ -362,10 +362,12 @@ func (h *Handler) searchFiles(userID, query string, limit, offset int) ([]messag
 
 func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []any, limit, offset int) ([]messageSearchResult, any, int, error) {
 	fetch := limit + 1
-	accessJoin := `JOIN room_memberships rm ON rm.room_id = m.room_id AND rm.user_id = ?`
+	accessJoin := `JOIN room_memberships rm ON rm.room_id = m.room_id AND rm.user_id = ? AND rm.notification_level != 'blocked'`
+	viewerRemarkSelect := `rm.remark_name`
 	args := []any{userID}
 	if h.isSuperuser(userID) {
 		accessJoin = ``
+		viewerRemarkSelect = `NULL`
 		args = []any{}
 	}
 	args = append(args, predicateArgs...)
@@ -395,7 +397,7 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
 		        u.is_superuser, sender_rm.room_display_name,
 		        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END,
-		        r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key
+		        r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, `+viewerRemarkSelect+`
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
 		 JOIN rooms r ON r.id = m.room_id
@@ -443,7 +445,7 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 	var room searchRoomContext
 	var senderID, senderUID, senderUsername string
 	var senderDisplayName, senderAvatarURL, senderDefaultAvatar, senderRoomDisplayName, senderRoomRole sql.NullString
-	var roomRID, roomAvatarURL, roomDefaultAvatar sql.NullString
+	var roomRID, roomAvatarURL, roomDefaultAvatar, roomRemarkName sql.NullString
 	var mentionsJSON, attachmentsJSON string
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
@@ -455,7 +457,7 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
 		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole,
-		&room.ID, &roomRID, &room.Name, &roomAvatarURL, &roomDefaultAvatar,
+		&room.ID, &roomRID, &room.Name, &roomAvatarURL, &roomDefaultAvatar, &roomRemarkName,
 	); err != nil {
 		return message{}, searchRoomContext{}, err
 	}
@@ -482,6 +484,7 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 	msg.CreatedAt = formatMillis(createdAt)
 
 	room.RID = roomRID.String
+	room.RemarkName = nullableString(roomRemarkName)
 	room.AvatarURL = nullableString(roomAvatarURL)
 	room.DefaultAvatarKey = "blue-3"
 	if roomDefaultAvatar.Valid && roomDefaultAvatar.String != "" {

@@ -21,6 +21,8 @@ type myRoomSettingsRequest struct {
 	DefaultAvatarKey   *string `json:"default_avatar_key"`
 	NotificationLevel  *string `json:"notification_level"`
 	NotificationPolicy *string `json:"notification_policy"`
+	IsPinned           *bool   `json:"is_pinned"`
+	Pinned             *bool   `json:"pinned"`
 }
 
 type userIDRequest struct {

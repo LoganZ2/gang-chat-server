@@ -1522,19 +1522,20 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 		"remark_name":         "My Managed Room",
 		"room_display_name":   "Local Nick",
 		"default_avatar_key":  "red-4",
-		"notification_policy": "mentions",
+		"notification_policy": "silent",
+		"is_pinned":           true,
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	personalRoom := response["room"].(map[string]any)
 	profile := personalRoom["personal_profile"].(map[string]any)
-	if personalRoom["remark_name"] != "My Managed Room" || personalRoom["notification_policy"] != "mentions" {
+	if personalRoom["remark_name"] != "My Managed Room" || personalRoom["notification_policy"] != "silent" || personalRoom["is_pinned"] != true {
 		t.Fatalf("room personal fields not returned on detail: %v", personalRoom)
 	}
 	if profile["display_name"] != "Local Nick" || profile["default_avatar_key"] != "red-4" {
 		t.Fatalf("room personal profile not returned: %v", profile)
 	}
 	settings := response["settings"].(map[string]any)
-	if settings["notification_policy"] != "mentions" {
+	if settings["notification_policy"] != "silent" || settings["is_pinned"] != true {
 		t.Fatalf("settings should expose notification_policy alias: %v", settings)
 	}
 
