@@ -165,7 +165,8 @@ func (h *Handler) getRoomSettings(c *gin.Context) {
 
 func (h *Handler) updateRoomSettings(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.isAdmin(roomID, currentUserID(c)) {
+	userID := currentUserID(c)
+	if !h.isAdmin(roomID, userID) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
 		return
 	}
@@ -174,10 +175,16 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	oldJoinPolicy := ""
-	if req.JoinPolicy != nil {
-		_ = h.DB.QueryRow(`SELECT join_policy FROM rooms WHERE id = ?`, roomID).Scan(&oldJoinPolicy)
+	oldName, oldDescription, oldJoinPolicy := "", "", ""
+	if req.Name != nil || req.Description != nil || req.JoinPolicy != nil {
+		_ = h.DB.QueryRow(
+			`SELECT name, description, join_policy FROM rooms WHERE id = ?`,
+			roomID,
+		).Scan(&oldName, &oldDescription, &oldJoinPolicy)
 	}
+	newName, newDescription := "", ""
+	nameChanged := false
+	descriptionChanged := false
 	joinPolicyClosedStateChanged := false
 	sets := []string{"updated_at = ?"}
 	args := []any{nowMillis()}
@@ -187,6 +194,8 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 			h.jsonError(c, http.StatusBadRequest, "validation_failed", "name is required")
 			return
 		}
+		newName = name
+		nameChanged = name != oldName
 		sets = append(sets, "name = ?")
 		args = append(args, name)
 	}
@@ -196,6 +205,8 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 			h.jsonError(c, http.StatusBadRequest, "validation_failed", "description must be at most 500 characters")
 			return
 		}
+		newDescription = description
+		descriptionChanged = description != oldDescription
 		sets = append(sets, "description = ?")
 		args = append(args, description)
 	}
@@ -231,7 +242,7 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 			args = append(args, nil, nil)
 		} else {
 			var url string
-			if err := h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, currentUserID(c)).Scan(&url); err != nil {
+			if err := h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, userID).Scan(&url); err != nil {
 				h.jsonError(c, http.StatusBadRequest, "validation_failed", "avatar asset not found")
 				return
 			}
@@ -264,7 +275,41 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		args = append(args, *req.MessageRecallWindowSeconds)
 	}
 	args = append(args, roomID)
-	if _, err := h.DB.Exec(`UPDATE rooms SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...); err != nil {
+	tx, err := h.DB.Begin()
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE rooms SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
+		return
+	}
+	if nameChanged {
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:    systemEventRoomNameChanged,
+			UserID:   userID,
+			ActorID:  userID,
+			OldValue: oldName,
+			NewValue: newName,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "append system message failed")
+			return
+		}
+	}
+	if descriptionChanged {
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:    systemEventRoomBioChanged,
+			UserID:   userID,
+			ActorID:  userID,
+			OldValue: oldDescription,
+			NewValue: newDescription,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "append system message failed")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
 		return
 	}

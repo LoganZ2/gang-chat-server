@@ -1517,6 +1517,23 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 	if createdBy["id"] != owner.User["id"] {
 		t.Fatalf("room creator should be owner before transfer: %v", managed)
 	}
+	messages := listRoomMessages(t, api, member.Token, roomID)
+	nameMessage := requireSystemMessage(t, messages, systemEventRoomNameChanged, owner.User["id"].(string))
+	nameAttachment := systemAttachment(t, nameMessage)
+	if nameAttachment["old_value"] != "Manage Me" || nameAttachment["new_value"] != "Managed" {
+		t.Fatalf("room name system attachment mismatch: %v", nameAttachment)
+	}
+	if actor := nameAttachment["actor"].(map[string]any); actor["id"] != owner.User["id"] {
+		t.Fatalf("room name system message should include actor: %v", nameAttachment)
+	}
+	descriptionMessage := requireSystemMessage(t, messages, systemEventRoomBioChanged, owner.User["id"].(string))
+	descriptionAttachment := systemAttachment(t, descriptionMessage)
+	if descriptionAttachment["old_value"] != "old intro" || descriptionAttachment["new_value"] != "Room bio" {
+		t.Fatalf("room description system attachment mismatch: %v", descriptionAttachment)
+	}
+	if actor := descriptionAttachment["actor"].(map[string]any); actor["id"] != owner.User["id"] {
+		t.Fatalf("room description system message should include actor: %v", descriptionAttachment)
+	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/me", member.Token, map[string]any{
 		"remark_name":         "My Managed Room",

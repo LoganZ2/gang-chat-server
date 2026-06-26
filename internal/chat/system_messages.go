@@ -10,6 +10,8 @@ const (
 	systemEventLiveJoined        = "live_joined"
 	systemEventLiveLeft          = "live_left"
 	systemEventRoomRoleChanged   = "room_role_changed"
+	systemEventRoomNameChanged   = "room_name_changed"
+	systemEventRoomBioChanged    = "room_description_changed"
 )
 
 func visibleMessageSQL(alias string) string {
@@ -34,6 +36,8 @@ type systemMessageSpec struct {
 	TargetID string
 	FromRole string
 	ToRole   string
+	OldValue string
+	NewValue string
 }
 
 func (h *Handler) appendSystemMessage(roomID string, spec systemMessageSpec) error {
@@ -81,6 +85,12 @@ func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMe
 	}
 	if spec.ToRole != "" {
 		attachment["to_role"] = spec.ToRole
+	}
+	if spec.OldValue != "" || systemMessageHasValuePatch(spec.Event) {
+		attachment["old_value"] = spec.OldValue
+	}
+	if spec.NewValue != "" || systemMessageHasValuePatch(spec.Event) {
+		attachment["new_value"] = spec.NewValue
 	}
 
 	now := nowMillis()
@@ -154,9 +164,23 @@ func systemMessageBody(spec systemMessageSpec, actorName string) string {
 			return body
 		}
 		return "被 " + actorName + " " + body
+	case systemEventRoomNameChanged:
+		if actorName == "" {
+			return "房间名称修改为" + spec.NewValue
+		}
+		return "房间名称被" + actorName + "修改为" + spec.NewValue
+	case systemEventRoomBioChanged:
+		if actorName == "" {
+			return "房间简介修改为\n" + spec.NewValue
+		}
+		return "房间简介被" + actorName + "修改为\n" + spec.NewValue
 	default:
 		return ""
 	}
+}
+
+func systemMessageHasValuePatch(event string) bool {
+	return event == systemEventRoomNameChanged || event == systemEventRoomBioChanged
 }
 
 func systemRoleLabel(role string) string {
