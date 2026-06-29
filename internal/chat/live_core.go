@@ -159,6 +159,7 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid connection_state")
 		return
 	}
+	normalizeExclusiveLiveMediaRequest(&req)
 
 	var previousConnectionState string
 	_ = h.DB.QueryRow(
@@ -247,6 +248,22 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{"participant": participant})
+}
+
+func normalizeExclusiveLiveMediaRequest(req *updateLiveRequest) {
+	if req == nil {
+		return
+	}
+	if req.CameraOn != nil && *req.CameraOn {
+		off := false
+		if req.ScreenSharing == nil || !*req.ScreenSharing {
+			req.ScreenSharing = &off
+		}
+	}
+	if req.ScreenSharing != nil && *req.ScreenSharing {
+		off := false
+		req.CameraOn = &off
+	}
 }
 
 func (h *Handler) buildLiveState(roomID string, fallbackUpdatedAt int64) (liveState, error) {

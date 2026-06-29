@@ -2111,6 +2111,47 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	}
 }
 
+func TestLiveCameraAndScreenShareAreExclusive(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("media_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Media Room", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/live/join", owner.Token, map[string]any{
+		"client_live_session_id": "clive_media_owner",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", owner.Token, map[string]any{
+		"camera_on": true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant := response["participant"].(map[string]any)
+	if participant["camera_on"] != true || participant["screen_sharing"] != false {
+		t.Fatalf("camera should disable screen share: %v", participant)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", owner.Token, map[string]any{
+		"screen_sharing": true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant = response["participant"].(map[string]any)
+	if participant["camera_on"] != false || participant["screen_sharing"] != true {
+		t.Fatalf("screen share should disable camera: %v", participant)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", owner.Token, map[string]any{
+		"camera_on":      true,
+		"screen_sharing": true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant = response["participant"].(map[string]any)
+	if participant["camera_on"] != false || participant["screen_sharing"] != true {
+		t.Fatalf("simultaneous true media flags should prefer screen share: %v", participant)
+	}
+}
+
 func TestLiveModerationPersistsOnlyWithinRoom(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("voice_scope_owner")
