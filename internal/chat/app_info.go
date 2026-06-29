@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -72,7 +73,38 @@ func (h *Handler) loadAppVersionManifest(ctx context.Context) (map[string]any, e
 		return decodeAppVersionManifest(raw)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.Cfg.AppVersionManifestURL, nil)
+	if h.Cfg.AppVersionManifestURL != "" {
+		manifest, err := fetchAppVersionJSON(ctx, h.Cfg.AppVersionManifestURL)
+		if err != nil {
+			return nil, err
+		}
+		if looksLikeReleasePayload(manifest) {
+			return h.loadAppVersionManifestFromRelease(ctx, manifest, h.Cfg.AppVersionManifestURL)
+		}
+		return manifest, nil
+	}
+
+	if h.Cfg.AppVersionReleaseURL != "" {
+		release, err := fetchAppVersionJSON(ctx, h.Cfg.AppVersionReleaseURL)
+		if err != nil {
+			return nil, err
+		}
+		return h.loadAppVersionManifestFromRelease(ctx, release, h.Cfg.AppVersionReleaseURL)
+	}
+
+	return nil, fmt.Errorf("app version manifest source is empty")
+}
+
+func (h *Handler) loadAppVersionManifestFromRelease(ctx context.Context, release map[string]any, releaseURL string) (map[string]any, error) {
+	manifestURL := appUpdateManifestURLFromRelease(release, releaseURL)
+	if manifestURL == "" {
+		return nil, fmt.Errorf("app-update.json asset not found in latest release")
+	}
+	return fetchAppVersionJSON(ctx, manifestURL)
+}
+
+func fetchAppVersionJSON(ctx context.Context, targetURL string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -83,13 +115,57 @@ func (h *Handler) loadAppVersionManifest(ctx context.Context) (map[string]any, e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("app version manifest returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("app version metadata returned HTTP %d", resp.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
 	return decodeAppVersionManifest(raw)
+}
+
+func looksLikeReleasePayload(raw map[string]any) bool {
+	_, hasAssets := raw["assets"]
+	_, hasTag := raw["tag_name"]
+	return hasAssets || hasTag
+}
+
+func appUpdateManifestURLFromRelease(release map[string]any, releaseURL string) string {
+	assets, ok := release["assets"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, item := range assets {
+		asset, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(firstString(asset, "name"), "app-update.json") {
+			continue
+		}
+		rawURL := firstString(asset, "browser_download_url", "download_url", "url")
+		return resolveAppVersionURL(releaseURL, rawURL)
+	}
+	return ""
+}
+
+func resolveAppVersionURL(baseURL, rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if parsed.IsAbs() {
+		return parsed.String()
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return rawURL
+	}
+	return base.ResolveReference(parsed).String()
 }
 
 func decodeAppVersionManifest(raw []byte) (map[string]any, error) {

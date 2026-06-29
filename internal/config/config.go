@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	DefaultAssetUploadMaxBytes   int64 = 50 * 1024 * 1024
-	DefaultImageUploadMaxBytes   int64 = 10 * 1024 * 1024
-	DefaultAppVersionManifestURL       = "https://loganz2.cn/logan/gang-chat-client/releases/download/v0.3.1/app-update.json"
+	DefaultAssetUploadMaxBytes  int64 = 50 * 1024 * 1024
+	DefaultImageUploadMaxBytes  int64 = 10 * 1024 * 1024
+	DefaultAppVersionReleaseURL       = "https://loganz2.cn/api/v1/repos/logan/gang-chat-client/releases/latest"
 	// DefaultMusicBoxMaxBytesPerRoom caps the on-disk size of a single room's
 	// transcoded music queue. The queue is bounded by total bytes, not item
 	// count, so this is the real backpressure knob.
@@ -57,6 +57,7 @@ type Config struct {
 	AppLatestVersion           string
 	AppMinimumSupportedVersion string
 	AppVersionManifestURL      string
+	AppVersionReleaseURL       string
 	AppVersionManifestPath     string
 	AppVersionCacheTTLSeconds  int64
 
@@ -139,7 +140,8 @@ func Load() *Config {
 		MusicBoxSourceBitrate:      envOr("GANG_MUSIC_BOX_SOURCE_BITRATE", "192"),
 		AppLatestVersion:           envOr("GANG_APP_LATEST_VERSION", ""),
 		AppMinimumSupportedVersion: envOr("GANG_APP_MINIMUM_SUPPORTED_VERSION", ""),
-		AppVersionManifestURL:      envOr("GANG_APP_VERSION_MANIFEST_URL", DefaultAppVersionManifestURL),
+		AppVersionManifestURL:      envOr("GANG_APP_VERSION_MANIFEST_URL", ""),
+		AppVersionReleaseURL:       envOr("GANG_APP_VERSION_RELEASE_URL", DefaultAppVersionReleaseURL),
 		AppVersionManifestPath:     envOr("GANG_APP_VERSION_MANIFEST_PATH", ""),
 		AppVersionCacheTTLSeconds:  envIntOr("GANG_APP_VERSION_CACHE_TTL_SECONDS", 300),
 	}
@@ -174,6 +176,7 @@ func Load() *Config {
 	flag.StringVar(&cfg.AppLatestVersion, "app-latest-version", cfg.AppLatestVersion, "fallback latest client version when no app update manifest is configured or reachable")
 	flag.StringVar(&cfg.AppMinimumSupportedVersion, "app-minimum-supported-version", cfg.AppMinimumSupportedVersion, "fallback minimum supported client version")
 	flag.StringVar(&cfg.AppVersionManifestURL, "app-version-manifest-url", cfg.AppVersionManifestURL, "optional HTTP URL for the client update manifest")
+	flag.StringVar(&cfg.AppVersionReleaseURL, "app-version-release-url", cfg.AppVersionReleaseURL, "optional Gitea latest release API URL used to find app-update.json")
 	flag.StringVar(&cfg.AppVersionManifestPath, "app-version-manifest-path", cfg.AppVersionManifestPath, "optional local JSON file path for the client update manifest")
 	flag.Int64Var(&cfg.AppVersionCacheTTLSeconds, "app-version-cache-ttl-seconds", cfg.AppVersionCacheTTLSeconds, "seconds to cache the client update manifest")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
@@ -193,7 +196,7 @@ func Load() *Config {
 }
 
 func (c *Config) HasAppVersionManifest() bool {
-	return c != nil && (c.AppVersionManifestPath != "" || c.AppVersionManifestURL != "")
+	return c != nil && (c.AppVersionManifestPath != "" || c.AppVersionManifestURL != "" || c.AppVersionReleaseURL != "")
 }
 
 // QQMusicConfig holds the connection details for the self-hosted QQ音乐 API

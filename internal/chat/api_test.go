@@ -214,6 +214,62 @@ func TestAppVersionEndpointUsesManifest(t *testing.T) {
 	}
 }
 
+func TestAppVersionEndpointUsesLatestReleaseAsset(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("version_release_owner")
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	mux.HandleFunc("/api/v1/repos/logan/gang-chat-client/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected latest release method: %s", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name": "v2.0.0",
+			"assets": []map[string]any{
+				{
+					"name":                 "GangChat-2.0.0-windows.zip",
+					"browser_download_url": server.URL + "/downloads/GangChat-2.0.0-windows.zip",
+				},
+				{
+					"name":                 "app-update.json",
+					"browser_download_url": server.URL + "/downloads/app-update.json",
+				},
+			},
+		})
+	})
+	mux.HandleFunc("/downloads/app-update.json", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected manifest method: %s", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"version":                   "2.0.0",
+			"minimum_supported_version": "1.5.0",
+			"download_url":              "https://example.test/GangChat-2.0.0-windows-x64-setup.exe",
+			"sha256":                    "release-sha",
+		})
+	})
+	api.cfg.AppVersionManifestPath = ""
+	api.cfg.AppVersionManifestURL = ""
+	api.cfg.AppVersionReleaseURL = server.URL + "/api/v1/repos/logan/gang-chat-client/releases/latest"
+
+	status, response := api.request(http.MethodGet, "/app/version", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["latest_version"] != "2.0.0" {
+		t.Fatalf("latest version mismatch: %v", response)
+	}
+	if response["minimum_supported_version"] != "1.5.0" {
+		t.Fatalf("minimum version mismatch: %v", response)
+	}
+	if response["download_url"] != "https://example.test/GangChat-2.0.0-windows-x64-setup.exe" {
+		t.Fatalf("download url mismatch: %v", response)
+	}
+	if response["sha256"] != "release-sha" {
+		t.Fatalf("sha256 mismatch: %v", response)
+	}
+}
+
 func (h *apiHarness) register(username string) testSession {
 	h.t.Helper()
 	status, response := h.request(http.MethodPost, "/auth/register", "", map[string]any{
