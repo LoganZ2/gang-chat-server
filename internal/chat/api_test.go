@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -299,6 +300,131 @@ func hasStickerNames(pack map[string]any, names ...string) bool {
 			return false
 		}
 		seen[name]--
+	}
+	return true
+}
+
+func postJSON(router *gin.Engine, path, token string, body any) *httptest.ResponseRecorder {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1"+path, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func countStickerPacks(t *testing.T, db *sql.DB, scope, ownerUserID, roomID, name string) int {
+	t.Helper()
+	var count int
+	var err error
+	if scope == "personal" {
+		err = db.QueryRow(
+			`SELECT COUNT(*) FROM sticker_packs WHERE scope = 'personal' AND owner_user_id = ? AND name = ?`,
+			ownerUserID, name,
+		).Scan(&count)
+	} else {
+		err = db.QueryRow(
+			`SELECT COUNT(*) FROM sticker_packs WHERE scope = 'room' AND room_id = ? AND name = ?`,
+			roomID, name,
+		).Scan(&count)
+	}
+	if err != nil {
+		t.Fatalf("count sticker packs: %v", err)
+	}
+	return count
+}
+
+func stickerNamesForDefaultPack(t *testing.T, db *sql.DB, scope, ownerUserID, roomID, name string) []string {
+	t.Helper()
+	var rows *sql.Rows
+	var err error
+	if scope == "personal" {
+		rows, err = db.Query(
+			`SELECT s.name
+			 FROM stickers s
+			 JOIN sticker_packs p ON p.id = s.pack_id
+			 WHERE p.scope = 'personal' AND p.owner_user_id = ? AND p.name = ?`,
+			ownerUserID, name,
+		)
+	} else {
+		rows, err = db.Query(
+			`SELECT s.name
+			 FROM stickers s
+			 JOIN sticker_packs p ON p.id = s.pack_id
+			 WHERE p.scope = 'room' AND p.room_id = ? AND p.name = ?`,
+			roomID, name,
+		)
+	}
+	if err != nil {
+		t.Fatalf("query sticker names: %v", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var stickerName string
+		if err := rows.Scan(&stickerName); err != nil {
+			t.Fatalf("scan sticker name: %v", err)
+		}
+		names = append(names, stickerName)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate sticker names: %v", err)
+	}
+	return names
+}
+
+func stickerPackNamesForScope(t *testing.T, db *sql.DB, scope, ownerUserID, roomID string) []string {
+	t.Helper()
+	var rows *sql.Rows
+	var err error
+	if scope == "personal" {
+		rows, err = db.Query(
+			`SELECT name FROM sticker_packs WHERE scope = 'personal' AND owner_user_id = ?`,
+			ownerUserID,
+		)
+	} else {
+		rows, err = db.Query(
+			`SELECT name FROM sticker_packs WHERE scope = 'room' AND room_id = ?`,
+			roomID,
+		)
+	}
+	if err != nil {
+		t.Fatalf("query sticker pack names: %v", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var packName string
+		if err := rows.Scan(&packName); err != nil {
+			t.Fatalf("scan sticker pack name: %v", err)
+		}
+		names = append(names, packName)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate sticker pack names: %v", err)
+	}
+	return names
+}
+
+func sameStringSet(actual, expected []string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	counts := make(map[string]int, len(actual))
+	for _, value := range actual {
+		counts[value]++
+	}
+	for _, value := range expected {
+		if counts[value] == 0 {
+			return false
+		}
+		counts[value]--
 	}
 	return true
 }
@@ -2509,6 +2635,133 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	api.requireStatus(status, http.StatusCreated, response)
 	if !hasStickerNames(response["pack"].(map[string]any), "ok", "ok (2)") {
 		t.Fatalf("duplicate room saved sticker should be suffixed: %v", response)
+	}
+}
+
+func TestConcurrentSaveStickerKeepsDefaultPacksAndNamesUnique(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("sticker_concurrent_owner")
+	member := api.register("sticker_concurrent_member")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Sticker Race", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	assetID := "asset_concurrent_sticker"
+	_, err := api.db.Exec(
+		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, created_at)
+		 VALUES (?, ?, 'sticker', 'ok.webp', 'image/webp', 12, 'https://example.com/ok.webp', ?)`,
+		assetID, owner.User["id"].(string), nowMillis(),
+	)
+	if err != nil {
+		t.Fatalf("insert asset: %v", err)
+	}
+
+	status, response = api.request(http.MethodPost, "/sticker-packs", owner.Token, map[string]any{
+		"scope":   "room",
+		"room_id": roomID,
+		"name":    "Room Source",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	sourcePack := response["pack"].(map[string]any)
+	status, response = api.request(http.MethodPost, "/sticker-packs/"+sourcePack["id"].(string)+"/stickers", owner.Token, map[string]any{
+		"asset_id": assetID,
+		"name":     "ok",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	sourceSticker := response["sticker"].(map[string]any)
+	sourceStickerID := sourceSticker["id"].(string)
+
+	saveStickerConcurrently := func(token, scope string) {
+		t.Helper()
+		const attempts = 6
+		var wg sync.WaitGroup
+		statuses := make([]int, attempts)
+		for index := 0; index < attempts; index++ {
+			wg.Add(1)
+			go func(index int) {
+				defer wg.Done()
+				rec := postJSON(api.router, "/rooms/"+roomID+"/stickers/save", token, map[string]any{
+					"sticker_id":   sourceStickerID,
+					"target_scope": scope,
+				})
+				statuses[index] = rec.Code
+			}(index)
+		}
+		wg.Wait()
+		for index, status := range statuses {
+			if status != http.StatusCreated {
+				t.Fatalf("save %s request %d status = %d, want %d", scope, index, status, http.StatusCreated)
+			}
+		}
+	}
+
+	saveStickerConcurrently(member.Token, "personal")
+	memberID := member.User["id"].(string)
+	if count := countStickerPacks(t, api.db, "personal", memberID, "", defaultPersonalStickerPackName); count != 1 {
+		t.Fatalf("concurrent personal saves should create one default pack, got %d", count)
+	}
+	personalNames := stickerNamesForDefaultPack(t, api.db, "personal", memberID, "", defaultPersonalStickerPackName)
+	if !sameStringSet(personalNames, []string{"ok", "ok (2)", "ok (3)", "ok (4)", "ok (5)", "ok (6)"}) {
+		t.Fatalf("concurrent personal saves should allocate unique names, got %v", personalNames)
+	}
+
+	saveStickerConcurrently(owner.Token, "room")
+	if count := countStickerPacks(t, api.db, "room", "", roomID, defaultRoomStickerPackName); count != 1 {
+		t.Fatalf("concurrent room saves should create one default pack, got %d", count)
+	}
+	roomNames := stickerNamesForDefaultPack(t, api.db, "room", "", roomID, defaultRoomStickerPackName)
+	if !sameStringSet(roomNames, []string{"ok", "ok (2)", "ok (3)", "ok (4)", "ok (5)", "ok (6)"}) {
+		t.Fatalf("concurrent room saves should allocate unique names, got %v", roomNames)
+	}
+}
+
+func TestConcurrentCreateStickerPacksKeepsNamesUnique(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("sticker_pack_concurrent_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Sticker Pack Race", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	createPacksConcurrently := func(scope string) {
+		t.Helper()
+		const attempts = 6
+		var wg sync.WaitGroup
+		statuses := make([]int, attempts)
+		for index := 0; index < attempts; index++ {
+			wg.Add(1)
+			go func(index int) {
+				defer wg.Done()
+				body := map[string]any{
+					"scope": scope,
+					"name":  "same",
+				}
+				if scope == "room" {
+					body["room_id"] = roomID
+				}
+				rec := postJSON(api.router, "/sticker-packs", owner.Token, body)
+				statuses[index] = rec.Code
+			}(index)
+		}
+		wg.Wait()
+		for index, status := range statuses {
+			if status != http.StatusCreated {
+				t.Fatalf("create %s pack request %d status = %d, want %d", scope, index, status, http.StatusCreated)
+			}
+		}
+	}
+
+	createPacksConcurrently("personal")
+	ownerID := owner.User["id"].(string)
+	personalNames := stickerPackNamesForScope(t, api.db, "personal", ownerID, "")
+	if !sameStringSet(personalNames, []string{"same", "same (2)", "same (3)", "same (4)", "same (5)", "same (6)"}) {
+		t.Fatalf("concurrent personal pack creates should allocate unique names, got %v", personalNames)
+	}
+
+	createPacksConcurrently("room")
+	roomNames := stickerPackNamesForScope(t, api.db, "room", "", roomID)
+	if !sameStringSet(roomNames, []string{"same", "same (2)", "same (3)", "same (4)", "same (5)", "same (6)"}) {
+		t.Fatalf("concurrent room pack creates should allocate unique names, got %v", roomNames)
 	}
 }
 

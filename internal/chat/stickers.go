@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 )
@@ -19,6 +20,24 @@ const (
 	defaultPersonalStickerPackName = "我的表情包"
 	defaultRoomStickerPackName     = "房间表情包"
 )
+
+type keyedMutexes struct {
+	locks sync.Map
+}
+
+func (m *keyedMutexes) lock(key string) func() {
+	value, _ := m.locks.LoadOrStore(key, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+func stickerPackNameLockKey(scope, ownerUserID, roomID string) string {
+	if scope == "room" {
+		return "sticker-packs:room:" + roomID
+	}
+	return "sticker-packs:personal:" + ownerUserID
+}
 
 func (h *Handler) listStickerPacks(c *gin.Context) {
 	scope := c.Query("scope")
@@ -83,6 +102,7 @@ func (h *Handler) createStickerPack(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "sticker pack name is required")
 		return
 	}
+	name := strings.TrimSpace(req.Name)
 	if req.Scope == "" {
 		req.Scope = "personal"
 	}
@@ -107,11 +127,20 @@ func (h *Handler) createStickerPack(c *gin.Context) {
 		ownerID = nil
 		roomID = req.RoomID
 	}
+	namespaceOwnerID := currentUserID(c)
+	namespaceRoomID := ""
+	if req.Scope == "room" {
+		namespaceOwnerID = ""
+		namespaceRoomID = req.RoomID
+	}
+	unlock := h.stickerPackLocks.lock(stickerPackNameLockKey(req.Scope, namespaceOwnerID, namespaceRoomID))
+	name = h.uniqueStickerPackName(req.Scope, namespaceOwnerID, namespaceRoomID, name, "")
 	_, err := h.DB.Exec(
 		`INSERT INTO sticker_packs (id, owner_user_id, room_id, scope, name, sort_order, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, ownerID, roomID, req.Scope, strings.TrimSpace(req.Name), sortOrder, now, now,
+		id, ownerID, roomID, req.Scope, name, sortOrder, now, now,
 	)
+	unlock()
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker pack failed")
 		return
@@ -133,15 +162,33 @@ func (h *Handler) updateStickerPack(c *gin.Context) {
 	if req.SortOrder != nil {
 		sortOrder = *req.SortOrder
 	}
-	_, err := h.DB.Exec(
-		`UPDATE sticker_packs SET name = COALESCE(NULLIF(?, ''), name), sort_order = ?, updated_at = ? WHERE id = ?`,
-		strings.TrimSpace(req.Name), sortOrder, nowMillis(), c.Param("pack_id"),
-	)
+	packID := c.Param("pack_id")
+	name := strings.TrimSpace(req.Name)
+	var err error
+	if name != "" {
+		scope, ownerUserID, roomID, ok := h.stickerPackNamespace(packID)
+		if !ok {
+			h.jsonError(c, http.StatusNotFound, "not_found", "sticker pack not found")
+			return
+		}
+		unlock := h.stickerPackLocks.lock(stickerPackNameLockKey(scope, ownerUserID, roomID))
+		name = h.uniqueStickerPackName(scope, ownerUserID, roomID, name, packID)
+		_, err = h.DB.Exec(
+			`UPDATE sticker_packs SET name = ?, sort_order = ?, updated_at = ? WHERE id = ?`,
+			name, sortOrder, nowMillis(), packID,
+		)
+		unlock()
+	} else {
+		_, err = h.DB.Exec(
+			`UPDATE sticker_packs SET sort_order = ?, updated_at = ? WHERE id = ?`,
+			sortOrder, nowMillis(), packID,
+		)
+	}
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update sticker pack failed")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"pack": h.stickerPackByID(c.Param("pack_id"))})
+	c.JSON(http.StatusOK, gin.H{"pack": h.stickerPackByID(packID)})
 }
 
 func (h *Handler) deleteStickerPack(c *gin.Context) {
@@ -174,7 +221,9 @@ func (h *Handler) addSticker(c *gin.Context) {
 	if name == "" {
 		name = "sticker"
 	}
-	name = h.uniqueStickerName(c.Param("pack_id"), name, "")
+	packID := c.Param("pack_id")
+	unlock := h.stickerPackLocks.lock("stickers:" + packID)
+	name = h.uniqueStickerName(packID, name, "")
 	sortOrder := 10
 	if req.SortOrder != nil {
 		sortOrder = *req.SortOrder
@@ -182,13 +231,14 @@ func (h *Handler) addSticker(c *gin.Context) {
 	id := newID("stk")
 	_, err := h.DB.Exec(
 		`INSERT INTO stickers (id, pack_id, asset_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, c.Param("pack_id"), req.AssetID, name, sortOrder, nowMillis(),
+		id, packID, req.AssetID, name, sortOrder, nowMillis(),
 	)
+	unlock()
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "add sticker failed")
 		return
 	}
-	h.touchStickerPack(c.Param("pack_id"))
+	h.touchStickerPack(packID)
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"sticker": h.stickerPayload(id)})
 }
 
@@ -213,8 +263,11 @@ func (h *Handler) updateSticker(c *gin.Context) {
 
 	name := strings.TrimSpace(req.Name)
 	if name != "" {
+		unlock := h.stickerPackLocks.lock("stickers:" + packID)
 		name = h.uniqueStickerName(packID, name, stickerID)
-		if _, err := h.DB.Exec(`UPDATE stickers SET name = ? WHERE id = ? AND pack_id = ?`, name, stickerID, packID); err != nil {
+		_, err := h.DB.Exec(`UPDATE stickers SET name = ? WHERE id = ? AND pack_id = ?`, name, stickerID, packID)
+		unlock()
+		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update sticker failed")
 			return
 		}
@@ -416,6 +469,7 @@ func (h *Handler) saveSticker(c *gin.Context) {
 	if name == "" {
 		name = "sticker"
 	}
+	unlock := h.stickerPackLocks.lock("stickers:" + packID)
 	name = h.uniqueStickerName(packID, name, "")
 	sortOrder := 10
 	if req.SortOrder != nil {
@@ -426,6 +480,7 @@ func (h *Handler) saveSticker(c *gin.Context) {
 		`INSERT INTO stickers (id, pack_id, asset_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		stickerID, packID, assetID, name, sortOrder, nowMillis(),
 	)
+	unlock()
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save sticker failed")
 		return
@@ -581,6 +636,24 @@ func (h *Handler) canManageStickerPack(packID, userID string) bool {
 	return roomID.Valid && h.isAdmin(roomID.String, userID)
 }
 
+func (h *Handler) stickerPackNamespace(packID string) (string, string, string, bool) {
+	var scope string
+	var ownerID, roomID sql.NullString
+	if err := h.DB.QueryRow(`SELECT scope, owner_user_id, room_id FROM sticker_packs WHERE id = ?`, packID).Scan(&scope, &ownerID, &roomID); err != nil {
+		return "", "", "", false
+	}
+	if scope == "room" {
+		if !roomID.Valid {
+			return "", "", "", false
+		}
+		return scope, "", roomID.String, true
+	}
+	if !ownerID.Valid {
+		return "", "", "", false
+	}
+	return scope, ownerID.String, "", true
+}
+
 func (h *Handler) visibleStickerAsset(roomID, userID, stickerID string) (string, string, bool) {
 	var assetID, name string
 	err := h.DB.QueryRow(
@@ -597,6 +670,9 @@ func (h *Handler) visibleStickerAsset(roomID, userID, stickerID string) (string,
 }
 
 func (h *Handler) ensureDefaultStickerPack(scope, ownerUserID, roomID, name string) (string, error) {
+	unlock := h.stickerPackLocks.lock(stickerPackNameLockKey(scope, ownerUserID, roomID))
+	defer unlock()
+
 	var id string
 	if scope == "personal" {
 		err := h.DB.QueryRow(
@@ -647,6 +723,46 @@ func (h *Handler) packHasScope(packID, scope, roomID string) bool {
 	}
 	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM sticker_packs WHERE id = ? AND scope = ?`, packID, scope).Scan(&count)
 	return count > 0
+}
+
+func (h *Handler) uniqueStickerPackName(scope, ownerUserID, roomID, desired, excludePackID string) string {
+	base := strings.TrimSpace(desired)
+	if base == "" {
+		return base
+	}
+	var rows *sql.Rows
+	var err error
+	if scope == "room" {
+		rows, err = h.DB.Query(
+			`SELECT name FROM sticker_packs WHERE scope = 'room' AND room_id = ? AND id <> ?`,
+			roomID, excludePackID,
+		)
+	} else {
+		rows, err = h.DB.Query(
+			`SELECT name FROM sticker_packs WHERE scope = 'personal' AND owner_user_id = ? AND id <> ?`,
+			ownerUserID, excludePackID,
+		)
+	}
+	if err != nil {
+		return base
+	}
+	defer rows.Close()
+	existing := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			existing[name] = true
+		}
+	}
+	if !existing[base] {
+		return base
+	}
+	for index := 2; ; index++ {
+		candidate := fmt.Sprintf("%s (%d)", base, index)
+		if !existing[candidate] {
+			return candidate
+		}
+	}
 }
 
 func (h *Handler) uniqueStickerName(packID, desired, excludeStickerID string) string {
