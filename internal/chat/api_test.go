@@ -1362,7 +1362,13 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	status, response = api.request(http.MethodPost, "/rooms/"+room2ID+"/join", alice.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 
-	if _, err := api.db.Exec(`UPDATE users SET bio = ?, gender = ? WHERE id = ?`, "Ships quietly", "female", alice.User["id"].(string)); err != nil {
+	if _, err := api.db.Exec(
+		`UPDATE users
+		    SET bio = ?, gender = ?, email_public = 1,
+		        phone_number = ?, phone_number_normalized = ?, phone_number_public = 1
+		  WHERE id = ?`,
+		"Ships quietly", "female", "+8613800000000", "8613800000000", alice.User["id"].(string),
+	); err != nil {
 		t.Fatalf("update alice bio: %v", err)
 	}
 	if _, err := api.db.Exec(
@@ -1387,6 +1393,18 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	if user["is_online"] != true {
 		t.Fatalf("profile should include online state: %v", profile)
 	}
+	if _, ok := user["email"]; ok {
+		t.Fatalf("viewer without public email should not see public email: %v", user)
+	}
+	if _, ok := user["email_public"]; ok {
+		t.Fatalf("viewer without public email should not see email visibility: %v", user)
+	}
+	if _, ok := user["phone_number"]; ok {
+		t.Fatalf("viewer without public phone should not see public phone: %v", user)
+	}
+	if _, ok := user["phone_number_public"]; ok {
+		t.Fatalf("viewer without public phone should not see phone visibility: %v", user)
+	}
 	commonRooms := user["common_rooms"].([]any)
 	if len(commonRooms) != 1 {
 		t.Fatalf("viewer should see only common rooms: %v", commonRooms)
@@ -1408,6 +1426,35 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	commonRooms = user["common_rooms"].([]any)
 	if len(commonRooms) != 1 || commonRooms[0].(map[string]any)["id"] != room1ID {
 		t.Fatalf("global profile should include viewer-visible common rooms: %v", commonRooms)
+	}
+
+	if _, err := api.db.Exec(`UPDATE users SET email_public = 1 WHERE id = ?`, viewer.User["id"].(string)); err != nil {
+		t.Fatalf("publish viewer email: %v", err)
+	}
+	status, response = api.request(http.MethodGet, "/users/"+alice.User["id"].(string)+"/profile", viewer.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	user = response["profile"].(map[string]any)["user"].(map[string]any)
+	if user["email"] != "profile_alice@example.com" || user["email_public"] != true {
+		t.Fatalf("viewer with public email should see target public email: %v", user)
+	}
+	if _, ok := user["phone_number"]; ok {
+		t.Fatalf("viewer without bound public phone should not see public phone: %v", user)
+	}
+	if _, ok := user["phone_number_public"]; ok {
+		t.Fatalf("viewer without bound public phone should not see phone visibility: %v", user)
+	}
+
+	if _, err := api.db.Exec(
+		`UPDATE users SET phone_number = ?, phone_number_normalized = ?, phone_number_public = 1 WHERE id = ?`,
+		"+8613900000000", "8613900000000", viewer.User["id"].(string),
+	); err != nil {
+		t.Fatalf("publish viewer phone: %v", err)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+room1ID+"/members/"+alice.User["id"].(string)+"/profile", viewer.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	user = response["profile"].(map[string]any)["user"].(map[string]any)
+	if user["phone_number"] != "+8613800000000" || user["phone_number_public"] != true {
+		t.Fatalf("viewer with public phone should see target public phone: %v", user)
 	}
 
 	status, response = api.request(http.MethodGet, "/rooms/"+room1ID+"/members/"+alice.User["id"].(string)+"/profile", super.Token, nil)

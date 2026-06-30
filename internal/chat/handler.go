@@ -28,19 +28,23 @@ type errorBody struct {
 }
 
 type userSummary struct {
-	ID               string           `json:"id"`
-	UID              string           `json:"uid,omitempty"`
-	Username         string           `json:"username"`
-	DisplayName      string           `json:"display_name"`
-	Gender           string           `json:"gender,omitempty"`
-	AvatarURL        *string          `json:"avatar_url"`
-	DefaultAvatarKey string           `json:"default_avatar_key"`
-	RoomDisplayName  *string          `json:"room_display_name,omitempty"`
-	RoomRole         string           `json:"room_role,omitempty"`
-	Bio              *string          `json:"bio,omitempty"`
-	IsSuperuser      bool             `json:"is_superuser,omitempty"`
-	IsOnline         *bool            `json:"is_online,omitempty"`
-	CommonRooms      []userCommonRoom `json:"common_rooms,omitempty"`
+	ID                string           `json:"id"`
+	UID               string           `json:"uid,omitempty"`
+	Username          string           `json:"username"`
+	DisplayName       string           `json:"display_name"`
+	Gender            string           `json:"gender,omitempty"`
+	Email             *string          `json:"email,omitempty"`
+	EmailPublic       *bool            `json:"email_public,omitempty"`
+	PhoneNumber       *string          `json:"phone_number,omitempty"`
+	PhoneNumberPublic *bool            `json:"phone_number_public,omitempty"`
+	AvatarURL         *string          `json:"avatar_url"`
+	DefaultAvatarKey  string           `json:"default_avatar_key"`
+	RoomDisplayName   *string          `json:"room_display_name,omitempty"`
+	RoomRole          string           `json:"room_role,omitempty"`
+	Bio               *string          `json:"bio,omitempty"`
+	IsSuperuser       bool             `json:"is_superuser,omitempty"`
+	IsOnline          *bool            `json:"is_online,omitempty"`
+	CommonRooms       []userCommonRoom `json:"common_rooms,omitempty"`
 }
 
 type userCommonRoom struct {
@@ -295,13 +299,18 @@ func (h *Handler) userSummary(userID string) (userSummary, error) {
 
 func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, error) {
 	var id, uid, username string
-	var displayName, avatarURL, defaultAvatar, bio, gender sql.NullString
-	var isSuperuser int
+	var displayName, avatarURL, defaultAvatar, bio, gender, phoneNumber sql.NullString
+	var email string
+	var isSuperuser, emailPublic, phoneNumberPublic int
 	err := h.DB.QueryRow(
-		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, bio, gender, is_superuser
+		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, bio, gender,
+		        email, email_public, phone_number, phone_number_public, is_superuser
 		 FROM users WHERE id = ? AND status = 'active'`,
 		userID,
-	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &bio, &gender, &isSuperuser)
+	).Scan(
+		&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &bio, &gender,
+		&email, &emailPublic, &phoneNumber, &phoneNumberPublic, &isSuperuser,
+	)
 	if err != nil {
 		return userSummary{}, err
 	}
@@ -313,6 +322,9 @@ func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, erro
 	summary.IsSuperuser = isSuperuser != 0
 	isOnline := h.isUserOnlineForViewer(id, viewerID)
 	summary.IsOnline = &isOnline
+	if err := h.applyVisibleContactFields(&summary, id, viewerID, email, emailPublic != 0, phoneNumber, phoneNumberPublic != 0); err != nil {
+		return userSummary{}, err
+	}
 	if !summary.IsSuperuser {
 		rooms, err := h.userProfileRooms(id, viewerID, viewerID == id || h.isSuperuser(viewerID))
 		if err != nil {
@@ -321,6 +333,42 @@ func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, erro
 		summary.CommonRooms = rooms
 	}
 	return summary, nil
+}
+
+func (h *Handler) applyVisibleContactFields(summary *userSummary, targetID, viewerID, email string, emailPublic bool, phoneNumber sql.NullString, phoneNumberPublic bool) error {
+	targetIsViewer := targetID == viewerID
+	viewerEmailPublic, viewerPhoneNumberPublic := false, false
+	var viewerEmail string
+	var viewerPhoneNumber sql.NullString
+	if !targetIsViewer {
+		err := h.DB.QueryRow(
+			`SELECT email, email_public, phone_number, phone_number_public FROM users WHERE id = ? AND status = 'active'`,
+			viewerID,
+		).Scan(&viewerEmail, &viewerEmailPublic, &viewerPhoneNumber, &viewerPhoneNumberPublic)
+		if err != nil {
+			return err
+		}
+	}
+
+	viewerHasPublicEmail := viewerEmailPublic && strings.TrimSpace(viewerEmail) != ""
+	viewerHasPublicPhoneNumber := viewerPhoneNumberPublic &&
+		viewerPhoneNumber.Valid &&
+		strings.TrimSpace(viewerPhoneNumber.String) != ""
+
+	if targetIsViewer || (emailPublic && viewerHasPublicEmail) {
+		if strings.TrimSpace(email) != "" {
+			summary.Email = &email
+		}
+		summary.EmailPublic = &emailPublic
+	}
+	if targetIsViewer || (phoneNumberPublic && viewerHasPublicPhoneNumber) {
+		if phoneNumber.Valid && strings.TrimSpace(phoneNumber.String) != "" {
+			value := phoneNumber.String
+			summary.PhoneNumber = &value
+		}
+		summary.PhoneNumberPublic = &phoneNumberPublic
+	}
+	return nil
 }
 
 func (h *Handler) userProfileRooms(targetID, viewerID string, allRooms bool) ([]userCommonRoom, error) {
