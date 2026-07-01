@@ -2,39 +2,54 @@ package musicbox
 
 import (
 	"database/sql"
-	"path/filepath"
+	"os"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/go-sql-driver/mysql"
 )
 
-// newTestStore spins up an in-file sqlite DB with just the schema the store
-// needs (users, rooms, and the two music box tables), avoiding a dependency on
-// the full migration set.
+// newTestStore uses a MySQL test database with just the schema the store needs
+// (users, rooms, and the two music box tables), avoiding a dependency on the
+// full production schema.
 func newTestStore(t *testing.T) *store {
 	t.Helper()
-	dsn := filepath.Join(t.TempDir(), "mbx-test.db")
-	db, err := sql.Open("sqlite3", dsn+"?_foreign_keys=1")
+	dsn := os.Getenv("GANG_TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("GANG_TEST_MYSQL_DSN is required for MySQL-backed musicbox tests")
+	}
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 
+	cleanup := []string{
+		`DROP TABLE IF EXISTS room_music_box_queue`,
+		`DROP TABLE IF EXISTS room_music_box_state`,
+		`DROP TABLE IF EXISTS rooms`,
+		`DROP TABLE IF EXISTS users`,
+	}
+	for _, s := range cleanup {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+	}
+
 	stmts := []string{
-		`CREATE TABLE users (id TEXT PRIMARY KEY)`,
-		`CREATE TABLE rooms (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE users (id VARCHAR(128) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE rooms (id VARCHAR(128) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE room_music_box_queue (
-			id TEXT PRIMARY KEY NOT NULL, room_id TEXT NOT NULL,
-			source TEXT NOT NULL DEFAULT 'netease', track_id TEXT NOT NULL,
-			title TEXT NOT NULL, artist TEXT NOT NULL DEFAULT '',
-			duration_ms INTEGER, status TEXT NOT NULL DEFAULT 'pending',
-			file_path TEXT, file_size_bytes INTEGER NOT NULL DEFAULT 0, error TEXT,
-			added_by_user_id TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
-			created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+			id VARCHAR(128) PRIMARY KEY NOT NULL, room_id VARCHAR(128) NOT NULL,
+			source VARCHAR(64) NOT NULL DEFAULT 'netease', track_id VARCHAR(255) NOT NULL,
+			title TEXT NOT NULL, artist TEXT NOT NULL,
+			duration_ms BIGINT, status VARCHAR(64) NOT NULL DEFAULT 'pending',
+			file_path TEXT, file_size_bytes BIGINT NOT NULL DEFAULT 0, error TEXT,
+			added_by_user_id VARCHAR(128) NOT NULL, sort_order BIGINT NOT NULL DEFAULT 0,
+			created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE room_music_box_state (
-			room_id TEXT PRIMARY KEY NOT NULL, state TEXT NOT NULL DEFAULT 'stopped',
-			current_item_id TEXT, position_ms INTEGER NOT NULL DEFAULT 0,
-			volume INTEGER NOT NULL DEFAULT 100, updated_at INTEGER NOT NULL)`,
+			room_id VARCHAR(128) PRIMARY KEY NOT NULL, state VARCHAR(64) NOT NULL DEFAULT 'stopped',
+			current_item_id VARCHAR(128), position_ms BIGINT NOT NULL DEFAULT 0,
+			volume INT NOT NULL DEFAULT 100, updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`INSERT INTO users (id) VALUES ('u1')`,
 		`INSERT INTO rooms (id) VALUES ('r1')`,
 	}

@@ -226,7 +226,7 @@ func (s *store) firstPlayable(roomID string, afterSort int64) (*QueueItem, error
 
 func (s *store) ensureState(roomID string) (*RoomState, error) {
 	_, _ = s.db.Exec(
-		`INSERT OR IGNORE INTO room_music_box_state (room_id, state, position_ms, volume, updated_at)
+		`INSERT IGNORE INTO room_music_box_state (room_id, state, position_ms, volume, updated_at)
 		 VALUES (?, 'stopped', 0, 100, ?)`, roomID, nowMillis())
 	return s.getState(roomID)
 }
@@ -254,10 +254,10 @@ func (s *store) saveState(st RoomState) error {
 	_, err := s.db.Exec(
 		`INSERT INTO room_music_box_state (room_id, state, current_item_id, position_ms, volume, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(room_id) DO UPDATE SET
-		   state = excluded.state, current_item_id = excluded.current_item_id,
-		   position_ms = excluded.position_ms, volume = excluded.volume,
-		   updated_at = excluded.updated_at`,
+		 ON DUPLICATE KEY UPDATE
+		   state = VALUES(state), current_item_id = VALUES(current_item_id),
+		   position_ms = VALUES(position_ms), volume = VALUES(volume),
+		   updated_at = VALUES(updated_at)`,
 		st.RoomID, string(st.State), ns(st.CurrentItemID), st.PositionMS, st.Volume, nowMillis())
 	return err
 }

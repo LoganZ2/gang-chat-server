@@ -2,21 +2,29 @@ package idgen
 
 import (
 	"database/sql"
+	"os"
 	"sync"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 func newSeqDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite3", "file::memory:?cache=shared&_journal_mode=WAL")
+	dsn := os.Getenv("GANG_TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("GANG_TEST_MYSQL_DSN is required for MySQL-backed idgen tests")
+	}
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(`CREATE TABLE id_sequences (name TEXT PRIMARY KEY NOT NULL, next_value INTEGER NOT NULL)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS id_sequences (name VARCHAR(64) PRIMARY KEY NOT NULL, next_value BIGINT NOT NULL)`); err != nil {
 		t.Fatalf("create: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM id_sequences`); err != nil {
+		t.Fatalf("clear: %v", err)
 	}
 	return db
 }
@@ -38,9 +46,6 @@ func TestNextSeqMonotonicStart(t *testing.T) {
 
 func TestNextSeqNoCollisionUnderConcurrency(t *testing.T) {
 	db := newSeqDB(t)
-	// SQLite serializes writers; one shared in-memory connection pool is enough
-	// to exercise the read-modify-write atomicity of the UPSERT.
-	db.SetMaxOpenConns(1)
 
 	const n = 500
 	var (

@@ -155,11 +155,11 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		_, err := h.DB.Exec(
 			`INSERT INTO join_requests (id, room_id, user_id, status, reason, created_at, updated_at)
 			 VALUES (?, ?, ?, 'pending', ?, ?, ?)
-			 ON CONFLICT(room_id, user_id) DO UPDATE SET
+			 ON DUPLICATE KEY UPDATE
 			   status = 'pending',
-			   reason = excluded.reason,
-			   created_at = excluded.created_at,
-			   updated_at = excluded.updated_at,
+			   reason = VALUES(reason),
+			   created_at = VALUES(created_at),
+			   updated_at = VALUES(updated_at),
 			   reviewer_user_id = NULL,
 			   reviewed_at = NULL`,
 			id, roomID, userID, reason, now, now,
@@ -333,9 +333,8 @@ func (h *Handler) addRoomMemberTx(tx *sql.Tx, roomID, userID string, joinedAt in
 		role = "owner"
 	}
 	res, err := tx.Exec(
-		`INSERT INTO room_memberships (room_id, user_id, role, joined_at)
-		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT(room_id, user_id) DO NOTHING`,
+		`INSERT IGNORE INTO room_memberships (room_id, user_id, role, joined_at)
+		 VALUES (?, ?, ?, ?)`,
 		roomID, userID, role, joinedAt,
 	)
 	if err != nil {

@@ -94,7 +94,11 @@ func newAPIHarness(t *testing.T) *apiHarness {
 		AssetDir:               filepath.Join(root, "assets"),
 		LiveKitHost:            "http://localhost:7880",
 	}
-	pool := db.Connect(filepath.Join(root, "gang-chat-test.db"))
+	dsn := os.Getenv("GANG_TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("GANG_TEST_MYSQL_DSN is required for MySQL-backed chat API tests")
+	}
+	pool := db.Connect(dsn)
 	t.Cleanup(func() { _ = pool.Close() })
 
 	router := gin.New()
@@ -503,15 +507,23 @@ func parseNumericID(t *testing.T, value any) int64 {
 
 func assertRoomInvitesKeepDeletedRooms(t *testing.T, pool *sql.DB) {
 	t.Helper()
-	rows, err := pool.Query(`PRAGMA foreign_key_list(room_invites)`)
+	rows, err := pool.Query(`
+		SELECT kcu.REFERENCED_TABLE_NAME, kcu.COLUMN_NAME, rc.DELETE_RULE
+		FROM information_schema.KEY_COLUMN_USAGE kcu
+		JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+		  ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+		 AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+		 AND rc.TABLE_NAME = kcu.TABLE_NAME
+		WHERE kcu.TABLE_SCHEMA = DATABASE()
+		  AND kcu.TABLE_NAME = 'room_invites'
+		  AND kcu.REFERENCED_TABLE_NAME IS NOT NULL`)
 	if err != nil {
 		t.Fatalf("read room_invites foreign keys: %v", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, seq int
-		var tableName, from, to, onUpdate, onDelete, match string
-		if err := rows.Scan(&id, &seq, &tableName, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+		var tableName, from, onDelete string
+		if err := rows.Scan(&tableName, &from, &onDelete); err != nil {
 			t.Fatalf("scan room_invites foreign key: %v", err)
 		}
 		if tableName == "rooms" && from == "room_id" {

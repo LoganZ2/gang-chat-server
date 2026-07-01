@@ -30,26 +30,30 @@ func NextRoomRID(db *sql.DB) string {
 }
 
 // nextSeq atomically allocates and returns the next value for the named
-// sequence. A single UPSERT...RETURNING statement reads-and-increments under
-// one row lock, so concurrent callers can never receive the same id (the old
-// "SELECT MAX(..)+1" scheme had a TOCTOU race that collided on the unique
-// index under concurrent registration / room creation).
-//
-// The id_sequences row is normally seeded by migration 020 to one past the
-// existing maximum. If it's somehow missing (fresh table), the INSERT branch
-// seeds it at start and the RETURNING hands back start.
+// sequence. The row is locked with SELECT ... FOR UPDATE, so concurrent callers
+// cannot receive the same id.
 func nextSeq(db *sql.DB, name string, start int64) string {
-	var allocated int64
-	err := db.QueryRow(
-		`INSERT INTO id_sequences (name, next_value) VALUES (?, ?)
-		 ON CONFLICT(name) DO UPDATE SET next_value = next_value + 1
-		 RETURNING next_value - 1`,
-		name, start+1,
-	).Scan(&allocated)
-	if err != nil || allocated < start {
-		// Last-resort fallback. Should be unreachable in practice; keeping the
-		// service alive with a best-effort id beats failing the request.
+	allocated := start
+	tx, err := db.Begin()
+	if err != nil {
+		return strconv.FormatInt(allocated, 10)
+	}
+	defer tx.Rollback()
+
+	err = tx.QueryRow(`SELECT next_value FROM id_sequences WHERE name = ? FOR UPDATE`, name).Scan(&allocated)
+	if err == sql.ErrNoRows {
 		allocated = start
+		if _, err := tx.Exec(`INSERT INTO id_sequences (name, next_value) VALUES (?, ?)`, name, start+1); err != nil {
+			return strconv.FormatInt(start, 10)
+		}
+	} else if err != nil || allocated < start {
+		return strconv.FormatInt(start, 10)
+	} else if _, err := tx.Exec(`UPDATE id_sequences SET next_value = ? WHERE name = ?`, allocated+1, name); err != nil {
+		return strconv.FormatInt(start, 10)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return strconv.FormatInt(start, 10)
 	}
 	return strconv.FormatInt(allocated, 10)
 }

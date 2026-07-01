@@ -63,9 +63,9 @@ func (h *Handler) joinLive(c *gin.Context) {
 		   mic_muted, mic_blocked, headphones_muted, headphones_blocked,
 		   voice_blocked, camera_on, screen_sharing, connection_state
 		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 'joining')
-		 ON CONFLICT(room_id, user_id) DO UPDATE SET
-		   client_live_session_id = excluded.client_live_session_id,
-		   updated_at = excluded.updated_at,
+		 ON DUPLICATE KEY UPDATE
+		   client_live_session_id = VALUES(client_live_session_id),
+		   updated_at = VALUES(updated_at),
 		   connection_state = 'joining'`,
 		liveSessionID, roomID, userID, req.ClientLiveSessionID, now, now,
 	)

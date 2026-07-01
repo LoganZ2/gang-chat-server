@@ -210,9 +210,9 @@ func (h *Handler) markRead(c *gin.Context) {
 	_, err := h.DB.Exec(
 		`INSERT INTO room_reads (room_id, user_id, last_read_message_id, updated_at)
 		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT(room_id, user_id) DO UPDATE SET
-		   last_read_message_id = excluded.last_read_message_id,
-		   updated_at = excluded.updated_at`,
+		 ON DUPLICATE KEY UPDATE
+		   last_read_message_id = VALUES(last_read_message_id),
+		   updated_at = VALUES(updated_at)`,
 		roomID, userID, req.LastReadMessageID, nowMillis(),
 	)
 	if err != nil {

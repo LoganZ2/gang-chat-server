@@ -97,7 +97,7 @@ func parseList(value string) []string {
 func Load() *Config {
 	cfg := &Config{
 		Bind:                     envOr("GANG_BIND", "127.0.0.1:21116"),
-		DatabaseURL:              envOr("GANG_DATABASE_URL", "gang-chat.db"),
+		DatabaseURL:              envOr("GANG_DATABASE_URL", "gang_chat:password@tcp(127.0.0.1:3306)/gang_chat?parseTime=true&charset=utf8mb4&loc=Local"),
 		JWTSecret:                envOr("GANG_JWT_SECRET", ""),
 		AccessTokenTTLSeconds:    envIntOr("GANG_ACCESS_TOKEN_TTL", 900),
 		RefreshTokenTTLSeconds:   envIntOr("GANG_REFRESH_TOKEN_TTL", 2592000),
@@ -136,7 +136,7 @@ func Load() *Config {
 	trustedProxies := strings.Join(cfg.TrustedProxies, ",")
 	flag.StringVar(&cfg.Bind, "bind", cfg.Bind, "listen address")
 	flag.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "JWT signing secret")
-	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "SQLite database path")
+	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "MySQL DSN")
 	flag.StringVar(&cfg.AssetDir, "asset-dir", cfg.AssetDir, "local asset cache directory")
 	flag.StringVar(&cfg.StorageBackend, "storage-backend", cfg.StorageBackend, "asset storage backend: local or cos")
 	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/COS public base URL for asset URLs")

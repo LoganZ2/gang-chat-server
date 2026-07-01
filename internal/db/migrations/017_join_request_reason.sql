@@ -1,1 +1,0 @@
-ALTER TABLE join_requests ADD COLUMN reason TEXT NOT NULL DEFAULT '';
