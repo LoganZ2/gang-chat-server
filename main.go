@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/auth"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/chat"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
@@ -23,7 +22,6 @@ import (
 )
 
 func main() {
-	_ = godotenv.Load()
 	cfg := config.Load()
 
 	pool := db.Connect(cfg.DatabaseURL)
@@ -76,8 +74,7 @@ func main() {
 		FFmpegPath:       cfg.FFmpegPath,
 		OpusBitrate:      cfg.MusicBoxOpusBitrate,
 		TranscodeWorkers: cfg.MusicBoxTranscodeWorkers,
-		Source:           cfg.MusicBoxSource,
-		SourceBitrate:    cfg.MusicBoxSourceBitrate,
+		DownloadBitrate:  cfg.MusicBoxDownloadBitrate,
 		LiveKitHost:      cfg.LiveKitHost,
 		Enabled:          cfg.LiveKitAPIKey != "" && cfg.LiveKitAPISecret != "",
 		QQ:               qqClient,

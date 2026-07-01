@@ -9,21 +9,26 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 )
 
-func TestNewAssetStorageAutoEnablesS3WhenS3ConfigIsPresent(t *testing.T) {
-	store, err := NewAssetStorage(&config.Config{
+func testS3Config() *config.Config {
+	return &config.Config{
 		S3Endpoint:        "https://os.ky-z.com:9000",
 		S3Bucket:          "gang-chat",
 		S3Region:          "us-east-1",
 		S3AccessKeyID:     "sid",
 		S3SecretAccessKey: "skey",
 		S3ForcePathStyle:  true,
-		AssetObjectPrefix: "room-assets",
-	})
+	}
+}
+
+func TestNewAssetStorageRequiresS3Config(t *testing.T) {
+	cfg := testS3Config()
+	cfg.AssetObjectPrefix = "room-assets"
+	store, err := NewAssetStorage(cfg)
 	if err != nil {
 		t.Fatalf("NewAssetStorage returned error: %v", err)
 	}
 	if !store.RemoteEnabled() {
-		t.Fatalf("S3 config should enable remote storage")
+		t.Fatalf("S3 storage should be enabled")
 	}
 
 	key := store.ObjectKey("asset_1", "room.png")
@@ -35,23 +40,7 @@ func TestNewAssetStorageAutoEnablesS3WhenS3ConfigIsPresent(t *testing.T) {
 	}
 }
 
-func TestNewAssetStorageRespectsExplicitLocalBackend(t *testing.T) {
-	store, err := NewAssetStorage(&config.Config{
-		StorageBackend:    "local",
-		S3Endpoint:        "https://os.ky-z.com:9000",
-		S3Bucket:          "gang-chat",
-		S3AccessKeyID:     "sid",
-		S3SecretAccessKey: "skey",
-	})
-	if err != nil {
-		t.Fatalf("NewAssetStorage returned error: %v", err)
-	}
-	if store.RemoteEnabled() {
-		t.Fatalf("explicit local backend should not enable S3")
-	}
-}
-
-func TestNewAssetStorageReportsIncompleteAutoS3Config(t *testing.T) {
+func TestNewAssetStorageReportsIncompleteS3Config(t *testing.T) {
 	_, err := NewAssetStorage(&config.Config{
 		S3Endpoint: "https://os.ky-z.com:9000",
 		S3Bucket:   "gang-chat",
@@ -59,17 +48,16 @@ func TestNewAssetStorageReportsIncompleteAutoS3Config(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected missing S3 credentials error")
 	}
-	if !strings.Contains(err.Error(), "GANG_S3_ACCESS_KEY_ID") {
+	if !strings.Contains(err.Error(), "s3_access_key_id") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestAssetStorageBuildsExpiringCacheHeadersFromTTL(t *testing.T) {
-	store, err := NewAssetStorage(&config.Config{
-		StorageBackend:       "local",
-		AssetCacheTTLSeconds: 60,
-		AssetObjectPrefix:    "assets",
-	})
+	cfg := testS3Config()
+	cfg.AssetCacheTTLSeconds = 60
+	cfg.AssetObjectPrefix = "assets"
+	store, err := NewAssetStorage(cfg)
 	if err != nil {
 		t.Fatalf("NewAssetStorage returned error: %v", err)
 	}
@@ -87,10 +75,9 @@ func TestAssetStorageBuildsExpiringCacheHeadersFromTTL(t *testing.T) {
 }
 
 func TestAssetStorageHonorsExplicitCacheControl(t *testing.T) {
-	store, err := NewAssetStorage(&config.Config{
-		StorageBackend:    "local",
-		AssetCacheControl: "private, max-age=5",
-	})
+	cfg := testS3Config()
+	cfg.AssetCacheControl = "private, max-age=5"
+	store, err := NewAssetStorage(cfg)
 	if err != nil {
 		t.Fatalf("NewAssetStorage returned error: %v", err)
 	}

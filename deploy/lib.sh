@@ -46,7 +46,7 @@ start_service() {
     return 1
   fi
   echo "[$name] starting..."
-  # Run from APP_DIR so the app's relative paths (.env, sqlite db) resolve there.
+  # Run from APP_DIR so the app's relative config.json path resolves there.
   (
     cd "$APP_DIR"
     nohup "$bin" "$@" </dev/null >>"$(logfile "$name")" 2>&1 &

@@ -21,6 +21,8 @@ import (
 // for QQ音乐 tracks.
 const SourceTencent = "tencent"
 
+const defaultGDSource = "netease"
+
 // ErrUnavailable is returned when the music box can't operate (LiveKit not
 // configured). Handlers map it to 503.
 var ErrUnavailable = errors.New("music box is not available")
@@ -36,8 +38,7 @@ type Config struct {
 	FFmpegPath       string
 	OpusBitrate      string
 	TranscodeWorkers int
-	Source           string // default GD source
-	SourceBitrate    string // GD download quality
+	DownloadBitrate  string // GD download quality
 	LiveKitHost      string
 	Enabled          bool // false when LiveKit isn't configured
 
@@ -72,8 +73,7 @@ type Manager struct {
 // ErrUnavailable, so callers don't need nil checks.
 func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(string)) *Manager {
 	gd := gdmusic.New(
-		gdmusic.WithDefaultSource(cfg.Source),
-		gdmusic.WithDefaultBitrate(cfg.SourceBitrate),
+		gdmusic.WithDefaultBitrate(cfg.DownloadBitrate),
 	)
 	m := &Manager{
 		cfg:           cfg,
@@ -163,7 +163,7 @@ func (m *Manager) resolveURL(ctx context.Context, item *QueueItem) (string, erro
 		}
 		return m.qq.TrackURL(ctx, item.TrackID)
 	}
-	resolved, err := m.gd.TrackURL(ctx, item.Source, item.TrackID, m.cfg.SourceBitrate)
+	resolved, err := m.gd.TrackURL(ctx, item.Source, item.TrackID, m.cfg.DownloadBitrate)
 	if err != nil {
 		return "", err
 	}
@@ -209,7 +209,7 @@ func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, err
 
 	source := p.Source
 	if source == "" {
-		source = m.cfg.Source
+		source = defaultGDSource
 	}
 	sortOrder, err := m.store.nextSortOrder(p.RoomID)
 	if err != nil {

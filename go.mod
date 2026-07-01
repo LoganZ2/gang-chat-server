@@ -11,7 +11,6 @@ require (
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/joho/godotenv v1.5.1
 	github.com/livekit/protocol v1.45.5-0.20260423163244-347de5a2ef78
 	github.com/livekit/server-sdk-go/v2 v2.16.3
 	github.com/oschwald/geoip2-golang v1.13.0

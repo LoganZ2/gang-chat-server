@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	DefaultAssetUploadMaxBytes int64 = 50 * 1024 * 1024
-	DefaultImageUploadMaxBytes int64 = 10 * 1024 * 1024
+	DefaultAssetUploadMaxBytes     int64 = 50 * 1024 * 1024
+	DefaultImageUploadMaxBytes     int64 = 10 * 1024 * 1024
 	DefaultMusicBoxMaxBytesPerRoom int64 = 200 * 1024 * 1024
 )
 
@@ -22,7 +22,6 @@ type Config struct {
 	LoginMaxAttempts         int      `json:"login_max_attempts"`
 	LoginWindowSeconds       int64    `json:"login_window_seconds"`
 	AssetDir                 string   `json:"asset_dir"`
-	StorageBackend           string   `json:"storage_backend"`
 	AssetPublicBaseURL       string   `json:"asset_public_base_url"`
 	AssetObjectPrefix        string   `json:"asset_object_prefix"`
 	AssetCacheControl        string   `json:"asset_cache_control"`
@@ -47,10 +46,9 @@ type Config struct {
 	MusicBoxMaxBytesPerRoom  int64    `json:"music_box_max_bytes_per_room"`
 	MusicBoxOpusBitrate      string   `json:"music_box_opus_bitrate"`
 	MusicBoxTranscodeWorkers int      `json:"music_box_transcode_workers"`
-	MusicBoxSource           string   `json:"music_box_source"`
-	MusicBoxSourceBitrate    string   `json:"music_box_source_bitrate"`
+	MusicBoxDownloadBitrate  string   `json:"music_box_download_bitrate"`
 
-	QQMusicBaseURL string `json:"qqmusic_base_url"`
+	QQMusicBaseURL  string `json:"qqmusic_base_url"`
 	QQMusicPassword string `json:"qqmusic_password"`
 }
 
@@ -67,10 +65,8 @@ func parseList(value string) []string {
 }
 
 func Load() *Config {
-	path := "config.json"
-	if p := os.Getenv("GANG_CONFIG"); p != "" {
-		path = p
-	}
+	path := configPathFromArgs(os.Args[1:])
+	flag.StringVar(&path, "config", path, "config JSON path")
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -87,7 +83,6 @@ func Load() *Config {
 	flag.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "JWT signing secret")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "MySQL DSN")
 	flag.StringVar(&cfg.AssetDir, "asset-dir", cfg.AssetDir, "local asset cache directory")
-	flag.StringVar(&cfg.StorageBackend, "storage-backend", cfg.StorageBackend, "asset storage backend: local or s3")
 	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/S3 public base URL for asset URLs")
 	flag.StringVar(&cfg.AssetObjectPrefix, "asset-object-prefix", cfg.AssetObjectPrefix, "object storage prefix for uploaded assets")
 	flag.StringVar(&cfg.AssetCacheControl, "asset-cache-control", cfg.AssetCacheControl, "Cache-Control header for uploaded assets")
@@ -107,8 +102,7 @@ func Load() *Config {
 	flag.Int64Var(&cfg.MusicBoxMaxBytesPerRoom, "music-box-max-bytes-per-room", cfg.MusicBoxMaxBytesPerRoom, "max on-disk bytes of transcoded music per room")
 	flag.StringVar(&cfg.MusicBoxOpusBitrate, "music-box-opus-bitrate", cfg.MusicBoxOpusBitrate, "Opus bitrate for broadcast transcode, e.g. 128k")
 	flag.IntVar(&cfg.MusicBoxTranscodeWorkers, "music-box-transcode-workers", cfg.MusicBoxTranscodeWorkers, "max concurrent transcode jobs")
-	flag.StringVar(&cfg.MusicBoxSource, "music-box-source", cfg.MusicBoxSource, "default GD music source")
-	flag.StringVar(&cfg.MusicBoxSourceBitrate, "music-box-source-bitrate", cfg.MusicBoxSourceBitrate, "GD source download quality (128/192/320/740/999)")
+	flag.StringVar(&cfg.MusicBoxDownloadBitrate, "music-box-download-bitrate", cfg.MusicBoxDownloadBitrate, "GD download quality (128/192/320/740/999)")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
 	allowedOrigins := strings.Join(cfg.AllowedOrigins, ",")
 	flag.StringVar(&allowedOrigins, "allowed-origins", allowedOrigins, "comma-separated allowed CORS origins, or * for any")
@@ -121,4 +115,22 @@ func Load() *Config {
 	}
 
 	return &cfg
+}
+
+func configPathFromArgs(args []string) string {
+	for i, arg := range args {
+		if arg == "-config" || arg == "--config" {
+			if i+1 < len(args) && args[i+1] != "" {
+				return args[i+1]
+			}
+			return "config.json"
+		}
+		if strings.HasPrefix(arg, "-config=") {
+			return strings.TrimPrefix(arg, "-config=")
+		}
+		if strings.HasPrefix(arg, "--config=") {
+			return strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	return "config.json"
 }

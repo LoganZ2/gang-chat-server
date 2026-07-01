@@ -39,7 +39,6 @@ type remoteStore interface {
 
 func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 	cacheDir := "assets"
-	backend := ""
 	objectPrefix := "assets"
 	publicBase := ""
 	cacheControl := ""
@@ -47,12 +46,6 @@ func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 	if cfg != nil {
 		if cfg.AssetDir != "" {
 			cacheDir = cfg.AssetDir
-		}
-		if cfg.StorageBackend != "" {
-			backend = strings.ToLower(strings.TrimSpace(cfg.StorageBackend))
-		}
-		if backend == "" && hasS3Config(cfg) {
-			backend = "s3"
 		}
 		if cfg.AssetObjectPrefix != "" {
 			objectPrefix = cfg.AssetObjectPrefix
@@ -75,19 +68,12 @@ func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 		publicBase:   publicBase,
 		cacheControl: cacheControl,
 	}
-	switch backend {
-	case "", "local", "disk":
-		return store, nil
-	case "s3", "s3-compatible", "s3_compatible":
-		remote, err := newS3Remote(cfg)
-		if err != nil {
-			return nil, err
-		}
-		store.remote = remote
-		return store, nil
-	default:
-		return nil, fmt.Errorf("unsupported storage backend %q", backend)
+	remote, err := newS3Remote(cfg)
+	if err != nil {
+		return nil, err
 	}
+	store.remote = remote
+	return store, nil
 }
 
 func (s *AssetStorage) CacheControl() string {
@@ -203,13 +189,13 @@ func newS3Remote(cfg *config.Config) (*s3Remote, error) {
 		return nil, errors.New("S3 storage requires config")
 	}
 	if strings.TrimSpace(cfg.S3Endpoint) == "" {
-		return nil, errors.New("S3 storage requires GANG_S3_ENDPOINT")
+		return nil, errors.New("S3 storage requires s3_endpoint")
 	}
 	if strings.TrimSpace(cfg.S3Bucket) == "" {
-		return nil, errors.New("S3 storage requires GANG_S3_BUCKET")
+		return nil, errors.New("S3 storage requires s3_bucket")
 	}
 	if strings.TrimSpace(cfg.S3AccessKeyID) == "" || strings.TrimSpace(cfg.S3SecretAccessKey) == "" {
-		return nil, errors.New("S3 storage requires GANG_S3_ACCESS_KEY_ID and GANG_S3_SECRET_ACCESS_KEY")
+		return nil, errors.New("S3 storage requires s3_access_key_id and s3_secret_access_key")
 	}
 	endpoint := strings.TrimRight(strings.TrimSpace(cfg.S3Endpoint), "/")
 	if _, err := url.ParseRequestURI(endpoint); err != nil {
@@ -273,17 +259,6 @@ func (r *s3Remote) Delete(ctx context.Context, key string) error {
 		Key:    aws.String(key),
 	})
 	return err
-}
-
-func hasS3Config(cfg *config.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	return strings.TrimSpace(cfg.S3Endpoint) != "" ||
-		strings.TrimSpace(cfg.S3Bucket) != "" ||
-		strings.TrimSpace(cfg.S3AccessKeyID) != "" ||
-		strings.TrimSpace(cfg.S3SecretAccessKey) != "" ||
-		strings.TrimSpace(cfg.S3SessionToken) != ""
 }
 
 func cleanObjectKey(value string) string {
