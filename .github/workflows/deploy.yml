@@ -7,7 +7,10 @@ name: build-and-deploy
 on:
   push:
     branches: [master]
-  workflow_dispatch:        # allow manual runs from the Gitea UI
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-and-deploy:
@@ -18,16 +21,14 @@ jobs:
       GOPROXY: https://goproxy.cn,direct
       GOTOOLCHAIN: auto
     steps:
-      # 海外 runner，直接从 github.com 拉 action。
       - name: Checkout
-        uses: https://github.com/actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Ensure build and deploy tools
         run: |
           if ! command -v gcc >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1; then
-            SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
-            $SUDO apt-get update
-            $SUDO apt-get install -y --no-install-recommends build-essential rsync
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends build-essential rsync
           fi
           gcc --version
           rsync --version | sed -n '1p'
@@ -48,7 +49,7 @@ jobs:
 
       - name: Cache Go
         id: cache-go
-        uses: https://github.com/actions/cache@v4
+        uses: actions/cache@v4
         with:
           path: |
             .cache/go-build
@@ -64,10 +65,9 @@ jobs:
         run: |
           GO_VERSION="$(awk '/^go [0-9]/{print $2; exit}' go.mod)"
           echo "installing Go ${GO_VERSION}"
-          SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+          sudo rm -rf /usr/local/go
           wget -qO /tmp/go.tgz "https://golang.google.cn/dl/go${GO_VERSION}.linux-amd64.tar.gz"
-          $SUDO rm -rf /usr/local/go
-          $SUDO tar -C /usr/local -xzf /tmp/go.tgz
+          sudo tar -C /usr/local -xzf /tmp/go.tgz
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           export PATH="/usr/local/go/bin:$PATH"
           /usr/local/go/bin/go version
