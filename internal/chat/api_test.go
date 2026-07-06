@@ -924,6 +924,10 @@ func TestLastMessagePreviewTreatsRemovedLatestMessageAsSystem(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", peer.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/me", member.Token, map[string]any{
+		"room_display_name": "Member In Removed Room",
+	})
+	api.requireStatus(status, http.StatusOK, response)
 
 	recalled := api.sendMessage(member.Token, roomID, "message to recall")
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages/"+recalled["id"].(string)+"/recall", member.Token, map[string]any{
@@ -934,10 +938,18 @@ func TestLastMessagePreviewTreatsRemovedLatestMessageAsSystem(t *testing.T) {
 	if recalledPayload["body"] != "message to recall" {
 		t.Fatalf("recalling sender should receive original recalled text: %v", recalledPayload)
 	}
+	recalledBy := recalledPayload["recalled_by"].(map[string]any)
+	if recalledBy["room_display_name"] != "Member In Removed Room" {
+		t.Fatalf("recall response should use actor room display name: %v", recalledBy)
+	}
 
 	ownerMessages := listRoomMessages(t, api, owner.Token, roomID)
 	if ownerMessages[len(ownerMessages)-1]["body"] != "message to recall" {
 		t.Fatalf("higher role should see recalled text body: %v", ownerMessages[len(ownerMessages)-1])
+	}
+	listedRecalledBy := ownerMessages[len(ownerMessages)-1]["recalled_by"].(map[string]any)
+	if listedRecalledBy["room_display_name"] != "Member In Removed Room" {
+		t.Fatalf("listed recalled message should use actor room display name: %v", listedRecalledBy)
 	}
 	peerMessages := listRoomMessages(t, api, peer.Token, roomID)
 	if peerMessages[len(peerMessages)-1]["body"] != "" {

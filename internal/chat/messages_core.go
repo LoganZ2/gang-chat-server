@@ -275,6 +275,7 @@ func (h *Handler) messageByClientIDForUser(roomID, userID, clientMessageID, view
 }
 
 func (h *Handler) messageForViewer(msg message, viewerID string) message {
+	h.hydrateMessageActionUsers(&msg)
 	if !msg.IsRecalled || msg.Type != "text" {
 		return msg
 	}
@@ -283,6 +284,22 @@ func (h *Handler) messageForViewer(msg message, viewerID string) message {
 	}
 	msg.Body = ""
 	return msg
+}
+
+func (h *Handler) hydrateMessageActionUsers(msg *message) {
+	if msg == nil {
+		return
+	}
+	if msg.RecalledBy == nil && msg.recalledByUserID != "" {
+		if summary, err := h.userSummaryForRoom(msg.RoomID, msg.recalledByUserID); err == nil {
+			msg.RecalledBy = &summary
+		}
+	}
+	if msg.ForceDeletedBy == nil && msg.forceDeletedByUserID != "" {
+		if summary, err := h.userSummaryForRoom(msg.RoomID, msg.forceDeletedByUserID); err == nil {
+			msg.ForceDeletedBy = &summary
+		}
+	}
 }
 
 func (h *Handler) queryMessage(query string, args ...any) (message, error) {
@@ -320,18 +337,14 @@ func (h *Handler) queryMessage(query string, args ...any) (message, error) {
 		msg.RecalledAt = &v
 	}
 	if recalledByUserID.Valid {
-		if summary, err := h.userSummary(recalledByUserID.String); err == nil {
-			msg.RecalledBy = &summary
-		}
+		msg.recalledByUserID = recalledByUserID.String
 	}
 	if forceDeletedAt.Valid {
 		v := formatMillis(forceDeletedAt.Int64)
 		msg.ForceDeletedAt = &v
 	}
 	if forceDeletedByUserID.Valid {
-		if summary, err := h.userSummary(forceDeletedByUserID.String); err == nil {
-			msg.ForceDeletedBy = &summary
-		}
+		msg.forceDeletedByUserID = forceDeletedByUserID.String
 	}
 	msg.CreatedAt = formatMillis(createdAt)
 	return msg, nil

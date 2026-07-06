@@ -183,6 +183,9 @@ type message struct {
 	ForceDeletedAt  *string      `json:"force_deleted_at"`
 	ForceDeletedBy  *userSummary `json:"force_deleted_by"`
 	CreatedAt       string       `json:"created_at"`
+
+	recalledByUserID     string `json:"-"`
+	forceDeletedByUserID string `json:"-"`
 }
 
 type liveParticipant struct {
@@ -295,6 +298,34 @@ func (h *Handler) userSummary(userID string) (userSummary, error) {
 		return userSummary{}, err
 	}
 	return summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar), nil
+}
+
+func (h *Handler) userSummaryForRoom(roomID, userID string) (userSummary, error) {
+	var id, uid, username string
+	var displayName, avatarURL, defaultAvatar, roomDisplayName, roomRole sql.NullString
+	var isSuperuser int
+	err := h.DB.QueryRow(
+		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        u.is_superuser, rm.room_display_name,
+		        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(rm.role, '') END
+		 FROM users u
+		 LEFT JOIN room_memberships rm ON rm.room_id = ? AND rm.user_id = u.id
+		 WHERE u.id = ?`,
+		roomID, userID,
+	).Scan(
+		&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar,
+		&isSuperuser, &roomDisplayName, &roomRole,
+	)
+	if err != nil {
+		return userSummary{}, err
+	}
+	summary := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+	summary.IsSuperuser = isSuperuser != 0
+	summary.RoomDisplayName = nullableString(roomDisplayName)
+	if roomRole.Valid && roomRole.String != "" {
+		summary.RoomRole = roomRole.String
+	}
+	return summary, nil
 }
 
 func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, error) {
@@ -566,9 +597,15 @@ func scanMessage(rows *sql.Rows) (message, error) {
 		v := formatMillis(recalledAt.Int64)
 		msg.RecalledAt = &v
 	}
+	if recalledByUserID.Valid {
+		msg.recalledByUserID = recalledByUserID.String
+	}
 	if forceDeletedAt.Valid {
 		v := formatMillis(forceDeletedAt.Int64)
 		msg.ForceDeletedAt = &v
+	}
+	if forceDeletedByUserID.Valid {
+		msg.forceDeletedByUserID = forceDeletedByUserID.String
 	}
 	msg.CreatedAt = formatMillis(createdAt)
 	return msg, nil
