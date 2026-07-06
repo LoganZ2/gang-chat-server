@@ -81,6 +81,7 @@ func (h *Handler) listMessages(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read messages")
 			return
 		}
+		msg = h.messageForViewer(msg, userID)
 		messages = append(messages, msg)
 	}
 	reverseMessages(messages)
@@ -162,7 +163,7 @@ func (h *Handler) sendMessage(c *gin.Context) {
 		messageID, roomID, userID, req.ClientMessageID, messageType, body, mentionsJSON, attachmentsJSON, now,
 	)
 	if err != nil {
-		existing, existingErr := h.messageByClientID(roomID, userID, req.ClientMessageID)
+		existing, existingErr := h.messageByClientIDForUser(roomID, userID, req.ClientMessageID, userID)
 		if existingErr == nil {
 			h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"message": existing})
 			return
@@ -172,7 +173,7 @@ func (h *Handler) sendMessage(c *gin.Context) {
 	}
 	_, _ = h.DB.Exec(`UPDATE rooms SET updated_at = ? WHERE id = ?`, now, roomID)
 
-	msg, err := h.messageByID(messageID)
+	msg, err := h.messageByIDForUser(messageID, userID)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read message")
 		return
@@ -240,6 +241,14 @@ func (h *Handler) messageByID(messageID string) (message, error) {
 	)
 }
 
+func (h *Handler) messageByIDForUser(messageID, viewerID string) (message, error) {
+	msg, err := h.messageByID(messageID)
+	if err != nil {
+		return message{}, err
+	}
+	return h.messageForViewer(msg, viewerID), nil
+}
+
 func (h *Handler) messageByClientID(roomID, userID, clientMessageID string) (message, error) {
 	return h.queryMessage(
 		`SELECT m.id, m.room_id, m.client_message_id, m.type, m.body,
@@ -255,6 +264,25 @@ func (h *Handler) messageByClientID(roomID, userID, clientMessageID string) (mes
 		 WHERE m.room_id = ? AND m.sender_user_id = ? AND m.client_message_id = ?`,
 		roomID, userID, clientMessageID,
 	)
+}
+
+func (h *Handler) messageByClientIDForUser(roomID, userID, clientMessageID, viewerID string) (message, error) {
+	msg, err := h.messageByClientID(roomID, userID, clientMessageID)
+	if err != nil {
+		return message{}, err
+	}
+	return h.messageForViewer(msg, viewerID), nil
+}
+
+func (h *Handler) messageForViewer(msg message, viewerID string) message {
+	if !msg.IsRecalled || msg.Type != "text" {
+		return msg
+	}
+	if viewerID != "" && h.canRecallMemberMessage(msg.RoomID, viewerID, msg.Sender.ID) {
+		return msg
+	}
+	msg.Body = ""
+	return msg
 }
 
 func (h *Handler) queryMessage(query string, args ...any) (message, error) {

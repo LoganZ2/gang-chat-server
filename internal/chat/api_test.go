@@ -912,6 +912,61 @@ func TestLastMessagePreviewIncludesSystemType(t *testing.T) {
 	}
 }
 
+func TestLastMessagePreviewTreatsRemovedLatestMessageAsSystem(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("removed_preview_owner")
+	member := api.register("removed_preview_member")
+	peer := api.register("removed_preview_peer")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Removed Preview", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", peer.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	recalled := api.sendMessage(member.Token, roomID, "message to recall")
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages/"+recalled["id"].(string)+"/recall", member.Token, map[string]any{
+		"reason": "test",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	recalledPayload := response["message"].(map[string]any)
+	if recalledPayload["body"] != "message to recall" {
+		t.Fatalf("recalling sender should receive original recalled text: %v", recalledPayload)
+	}
+
+	ownerMessages := listRoomMessages(t, api, owner.Token, roomID)
+	if ownerMessages[len(ownerMessages)-1]["body"] != "message to recall" {
+		t.Fatalf("higher role should see recalled text body: %v", ownerMessages[len(ownerMessages)-1])
+	}
+	peerMessages := listRoomMessages(t, api, peer.Token, roomID)
+	if peerMessages[len(peerMessages)-1]["body"] != "" {
+		t.Fatalf("same role peer should not see recalled text body: %v", peerMessages[len(peerMessages)-1])
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card := roomCardByID(t, response, roomID)
+	last := card["last_message"].(map[string]any)
+	if last["type"] != systemMessageType || last["sender_display_name"] != "" || last["body_preview"] != "removed_preview_member 撤回了一条消息" {
+		t.Fatalf("recalled last_message should match removed system row: %v", last)
+	}
+
+	deleted := api.sendMessage(member.Token, roomID, "message to delete")
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages/"+deleted["id"].(string)+"/force-delete", owner.Token, map[string]any{
+		"confirm": true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/rooms", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card = roomCardByID(t, response, roomID)
+	last = card["last_message"].(map[string]any)
+	if last["type"] != systemMessageType || last["sender_display_name"] != "" || last["body_preview"] != "removed_preview_owner 删除了一条消息" {
+		t.Fatalf("force-deleted last_message should match removed system row: %v", last)
+	}
+}
+
 func TestHistoricalLiveSystemMessagesAreHidden(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("hidden_live_owner")

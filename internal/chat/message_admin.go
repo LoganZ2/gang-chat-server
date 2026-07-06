@@ -61,7 +61,7 @@ func (h *Handler) recallMessage(c *gin.Context) {
 		return
 	}
 	h.applyRecall(roomID, messageID, userID)
-	msg, _ := h.messageByID(messageID)
+	msg, _ := h.messageByIDForUser(messageID, userID)
 	c.JSON(http.StatusOK, gin.H{"message": msg})
 }
 
@@ -147,7 +147,7 @@ func (h *Handler) forceDeleteMessage(c *gin.Context) {
 		h.jsonError(c, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
-	msg, _ := h.messageByID(c.Param("message_id"))
+	msg, _ := h.messageByIDForUser(c.Param("message_id"), currentUserID(c))
 	// Force-deleting the latest message changes the last_message preview.
 	h.publishRoomUpdated(roomID)
 	c.JSON(http.StatusOK, gin.H{"message": msg})
@@ -155,7 +155,8 @@ func (h *Handler) forceDeleteMessage(c *gin.Context) {
 
 func (h *Handler) applyRecall(roomID, messageID, userID string) {
 	_, _ = h.DB.Exec(
-		`UPDATE messages SET body = '', mentions_json = '[]', attachments_json = '[]',
+		`UPDATE messages SET body = CASE WHEN type = 'text' THEN body ELSE '' END,
+		        mentions_json = '[]', attachments_json = '[]',
 		        is_recalled = 1, recalled_at = ?, recalled_by_user_id = ?
 		 WHERE id = ? AND room_id = ?`,
 		nowMillis(), userID, messageID, roomID,

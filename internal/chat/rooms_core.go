@@ -576,12 +576,18 @@ func (h *Handler) livePreview(roomID string) ([]userSummary, int, error) {
 }
 
 func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
-	var id, sender, messageType, body, attachmentsJSON string
+	var id, senderUserID, sender, messageType, body, attachmentsJSON string
+	var recalledByUserID, forceDeletedByUserID sql.NullString
+	var isRecalled, isForceDeleted bool
 	var createdAt int64
 	err := h.DB.QueryRow(
 		`SELECT m.id,
+		        m.sender_user_id,
 		        COALESCE(NULLIF(sender_rm.room_display_name, ''), NULLIF(u.display_name, ''), u.username),
-		        m.type, m.body, m.attachments_json, m.created_at
+		        m.type, m.body, m.attachments_json,
+		        m.is_recalled, m.recalled_by_user_id,
+		        m.is_force_deleted, m.force_deleted_by_user_id,
+		        m.created_at
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
@@ -589,7 +595,12 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 		 ORDER BY m.created_at DESC
 		 LIMIT 1`,
 		roomID,
-	).Scan(&id, &sender, &messageType, &body, &attachmentsJSON, &createdAt)
+	).Scan(
+		&id, &senderUserID, &sender, &messageType, &body, &attachmentsJSON,
+		&isRecalled, &recalledByUserID,
+		&isForceDeleted, &forceDeletedByUserID,
+		&createdAt,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -598,7 +609,19 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 	}
 	previewSender := sender
 	bodyPreview := lastMessageBodyPreview(messageType, body, attachmentsJSON)
-	if messageType == systemMessageType {
+	if isRecalled || isForceDeleted {
+		previewSender = ""
+		messageType = systemMessageType
+		bodyPreview = h.removedLastMessagePreview(
+			roomID,
+			senderUserID,
+			sender,
+			isRecalled,
+			recalledByUserID,
+			isForceDeleted,
+			forceDeletedByUserID,
+		)
+	} else if messageType == systemMessageType {
 		if systemPreview, ok := systemRoomProfileChangeLastMessagePreview(attachmentsJSON); ok {
 			previewSender = ""
 			bodyPreview = systemPreview
@@ -611,6 +634,68 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 		BodyPreview:       bodyPreview,
 		CreatedAt:         formatMillis(createdAt),
 	}, nil
+}
+
+func (h *Handler) removedLastMessagePreview(
+	roomID, senderUserID, senderDisplayName string,
+	isRecalled bool,
+	recalledByUserID sql.NullString,
+	isForceDeleted bool,
+	forceDeletedByUserID sql.NullString,
+) string {
+	if isForceDeleted {
+		actorName := ""
+		if forceDeletedByUserID.Valid {
+			actorName = h.lastMessageUserDisplayName(roomID, forceDeletedByUserID.String)
+		}
+		if actorName == "" {
+			return "消息已被删除"
+		}
+		return actorName + " 删除了一条消息"
+	}
+
+	if !isRecalled {
+		return "消息已被删除"
+	}
+	actorUserID := senderUserID
+	if recalledByUserID.Valid && strings.TrimSpace(recalledByUserID.String) != "" {
+		actorUserID = recalledByUserID.String
+	}
+	actorName := senderDisplayName
+	if actorUserID != senderUserID {
+		actorName = h.lastMessageUserDisplayName(roomID, actorUserID)
+	}
+	if actorName == "" {
+		actorName = "用户"
+	}
+	if actorUserID == senderUserID {
+		return actorName + " 撤回了一条消息"
+	}
+	if senderDisplayName == "" {
+		senderDisplayName = h.lastMessageUserDisplayName(roomID, senderUserID)
+	}
+	if senderDisplayName == "" {
+		senderDisplayName = "用户"
+	}
+	return actorName + " 撤回了一条来自 " + senderDisplayName + " 的消息"
+}
+
+func (h *Handler) lastMessageUserDisplayName(roomID, userID string) string {
+	if strings.TrimSpace(userID) == "" {
+		return ""
+	}
+	var displayName string
+	err := h.DB.QueryRow(
+		`SELECT COALESCE(NULLIF(rm.room_display_name, ''), NULLIF(u.display_name, ''), u.username)
+		 FROM users u
+		 LEFT JOIN room_memberships rm ON rm.room_id = ? AND rm.user_id = u.id
+		 WHERE u.id = ?`,
+		roomID, userID,
+	).Scan(&displayName)
+	if err != nil {
+		return ""
+	}
+	return displayName
 }
 
 func systemRoomProfileChangeLastMessagePreview(attachmentsJSON string) (string, bool) {
