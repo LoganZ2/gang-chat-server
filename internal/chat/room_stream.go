@@ -53,6 +53,7 @@ type roomSnapshot struct {
 	LiveAvatarPreview           []userSummary       `json:"live_avatar_preview"`
 	LastMessage                 *lastMessagePreview `json:"last_message"`
 	UnreadCount                 int                 `json:"unread_count"`
+	UnreadMentionCount          int                 `json:"unread_mention_count"`
 	CreatedAt                   string              `json:"created_at"`
 	UpdatedAt                   string              `json:"updated_at"`
 }
@@ -175,9 +176,11 @@ func (h *Handler) applyRoomSnapshotPersonalFields(snapshot *roomSnapshot, roomID
 	snapshot.NotificationPolicy = notificationPolicy
 	snapshot.IsPinned = isPinned != 0
 	snapshot.UnreadCount = h.unreadCount(roomID, userID)
+	snapshot.UnreadMentionCount = h.unreadMentionCount(roomID, userID)
 	if notificationPolicy == "blocked" {
 		snapshot.LastMessage = nil
 		snapshot.UnreadCount = 0
+		snapshot.UnreadMentionCount = 0
 	}
 }
 

@@ -94,6 +94,7 @@ type roomCard struct {
 	LiveAvatarPreview    []userSummary       `json:"live_avatar_preview"`
 	LastMessage          *lastMessagePreview `json:"last_message"`
 	UnreadCount          int                 `json:"unread_count"`
+	UnreadMentionCount   int                 `json:"unread_mention_count"`
 	UpdatedAt            string              `json:"updated_at"`
 }
 

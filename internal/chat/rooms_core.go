@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -377,6 +378,7 @@ func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error)
 		LiveAvatarPreview:    livePreview,
 		LastMessage:          lastMessage,
 		UnreadCount:          h.unreadCount(rec.ID, userID),
+		UnreadMentionCount:   h.unreadMentionCount(rec.ID, userID),
 		UpdatedAt:            formatMillis(rec.UpdatedAt),
 	}, nil
 }
@@ -923,4 +925,258 @@ func (h *Handler) unreadCount(roomID, userID string) int {
 		roomID, userID, readAt,
 	).Scan(&count)
 	return count
+}
+
+func (h *Handler) unreadMentionCount(roomID, userID string) int {
+	var notificationLevel string
+	_ = h.DB.QueryRow(
+		`SELECT notification_level FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&notificationLevel)
+	if notificationLevel == "blocked" {
+		return 0
+	}
+
+	target, ok := h.mentionTarget(roomID, userID)
+	if !ok {
+		return 0
+	}
+
+	var readAt int64
+	_ = h.DB.QueryRow(
+		`SELECT m.created_at
+		 FROM room_reads rr
+		 JOIN messages m ON m.id = rr.last_read_message_id
+		 WHERE rr.room_id = ? AND rr.user_id = ?`,
+		roomID, userID,
+	).Scan(&readAt)
+
+	rows, err := h.DB.Query(
+		`SELECT m.body, m.mentions_json
+		 FROM messages m
+		 WHERE m.room_id = ? AND m.sender_user_id != ? AND m.created_at > ? AND `+visibleMessageSQL("m"),
+		roomID, userID, readAt,
+	)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var body, mentionsJSON string
+		if err := rows.Scan(&body, &mentionsJSON); err != nil {
+			return count
+		}
+		if mentionMessageTargetsUser(body, mentionsJSON, target) {
+			count++
+		}
+	}
+	return count
+}
+
+type mentionTarget struct {
+	UserID string
+	UID    string
+	Labels map[string]struct{}
+	Admin  bool
+}
+
+func (h *Handler) mentionTarget(roomID, userID string) (mentionTarget, bool) {
+	var uid, username string
+	var displayName, roomDisplayName sql.NullString
+	var role sql.NullString
+	var isSuperuser int
+	err := h.DB.QueryRow(
+		`SELECT u.id, u.uid, u.username, u.display_name, rm.room_display_name,
+		        rm.role, u.is_superuser
+		 FROM users u
+		 LEFT JOIN room_memberships rm ON rm.room_id = ? AND rm.user_id = u.id
+		 WHERE u.id = ?`,
+		roomID, userID,
+	).Scan(&userID, &uid, &username, &displayName, &roomDisplayName, &role, &isSuperuser)
+	if err != nil {
+		return mentionTarget{}, false
+	}
+	target := mentionTarget{
+		UserID: userID,
+		UID:    uid,
+		Labels: map[string]struct{}{},
+		Admin:  isSuperuser != 0 || mentionRoleIsAdmin(role.String),
+	}
+	for _, value := range []string{
+		userID,
+		uid,
+		username,
+		displayName.String,
+		roomDisplayName.String,
+	} {
+		if label := normalizeMentionLabel(value); label != "" {
+			target.Labels[label] = struct{}{}
+		}
+	}
+	return target, true
+}
+
+func mentionMessageTargetsUser(body, mentionsJSON string, target mentionTarget) bool {
+	for _, raw := range decodeJSONArray(mentionsJSON) {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(stringFromMap(item, "type"))) {
+		case "all":
+			return true
+		case "admins":
+			if target.Admin {
+				return true
+			}
+		case "user":
+			userID := strings.TrimSpace(stringFromMap(item, "user_id"))
+			uid := strings.TrimSpace(stringFromMap(item, "uid"))
+			if userID != "" && userID == target.UserID {
+				return true
+			}
+			if uid != "" && uid == target.UID {
+				return true
+			}
+		}
+	}
+
+	if mentionTextTargetsKnownLabel(body, target) {
+		return true
+	}
+
+	for _, token := range mentionTextTokens(body) {
+		normalized := normalizeMentionLabel(token)
+		switch normalized {
+		case normalizeMentionLabel("所有人"):
+			return true
+		case normalizeMentionLabel("管理员"):
+			if target.Admin {
+				return true
+			}
+		default:
+			if _, ok := target.Labels[normalized]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mentionTextTargetsKnownLabel(body string, target mentionTarget) bool {
+	if len(target.Labels) == 0 {
+		return false
+	}
+	runes := []rune(body)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != '@' {
+			continue
+		}
+		start := i + 1
+		if start >= len(runes) {
+			continue
+		}
+		remainder := strings.ToLower(string(runes[start:]))
+		for label := range target.Labels {
+			labelRunes := []rune(label)
+			if label == "" || len(labelRunes) > len(runes)-start {
+				continue
+			}
+			if !strings.HasPrefix(remainder, label) {
+				continue
+			}
+			end := start + len(labelRunes)
+			if end < len(runes) && !isMentionTerminatorRune(runes[end]) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func mentionTextTokens(value string) []string {
+	runes := []rune(value)
+	tokens := make([]string, 0)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != '@' {
+			continue
+		}
+		start := i + 1
+		end := start
+		for end < len(runes) && !isMentionTerminatorRune(runes[end]) {
+			if runes[end] == '@' {
+				break
+			}
+			end++
+		}
+		if end <= start {
+			continue
+		}
+		token := string(runes[start:end])
+		if looksLikeEmailMention(runes, i, end) {
+			continue
+		}
+		tokens = append(tokens, token)
+		i = end - 1
+	}
+	return tokens
+}
+
+func isMentionTerminatorRune(value rune) bool {
+	return unicode.IsSpace(value) || value == '\u3000'
+}
+
+func looksLikeEmailMention(runes []rune, atIndex, end int) bool {
+	if atIndex <= 0 || end <= atIndex+1 {
+		return false
+	}
+	domain := string(runes[atIndex+1 : end])
+	if !strings.Contains(domain, ".") {
+		return false
+	}
+	localStart := atIndex - 1
+	for localStart >= 0 && isEmailLocalRune(runes[localStart]) {
+		localStart--
+	}
+	localStart++
+	if localStart >= atIndex {
+		return false
+	}
+	for _, r := range runes[atIndex+1 : end] {
+		if !isEmailDomainRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isEmailLocalRune(value rune) bool {
+	return (value >= '0' && value <= '9') ||
+		(value >= 'A' && value <= 'Z') ||
+		(value >= 'a' && value <= 'z') ||
+		value == '.' || value == '_' || value == '%' ||
+		value == '+' || value == '-'
+}
+
+func isEmailDomainRune(value rune) bool {
+	return (value >= '0' && value <= '9') ||
+		(value >= 'A' && value <= 'Z') ||
+		(value >= 'a' && value <= 'z') ||
+		value == '.' || value == '-'
+}
+
+func normalizeMentionLabel(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func mentionRoleIsAdmin(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "owner", "creator", "admin", "administrator", "superuser":
+		return true
+	default:
+		return false
+	}
 }
