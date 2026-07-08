@@ -3740,6 +3740,26 @@ func TestRoomEventNotifications(t *testing.T) {
 	if promotion["actor"].(map[string]any)["room_role"] != "owner" {
 		t.Fatalf("promotion actor should include room role: %v", promotion)
 	}
+	promotionMessageID, _ := promotion["message_id"].(string)
+	if promotionMessageID == "" {
+		t.Fatalf("promotion notification should include message_id: %v", promotion)
+	}
+	if _, err := api.db.Exec(`UPDATE room_notifications SET message_id = NULL WHERE id = ?`, promotion["id"].(string)); err != nil {
+		t.Fatalf("clear promotion message_id: %v", err)
+	}
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	promotion = response["notifications"].([]any)[0].(map[string]any)
+	if promotion["message_id"] != promotionMessageID {
+		t.Fatalf("legacy promotion notification should resolve message_id: %v", promotion)
+	}
+	var storedPromotionMessageID sql.NullString
+	if err := api.db.QueryRow(`SELECT message_id FROM room_notifications WHERE id = ?`, promotion["id"].(string)).Scan(&storedPromotionMessageID); err != nil {
+		t.Fatalf("read backfilled promotion message_id: %v", err)
+	}
+	if !storedPromotionMessageID.Valid || storedPromotionMessageID.String != promotionMessageID {
+		t.Fatalf("promotion message_id should be backfilled in storage: %v", storedPromotionMessageID)
+	}
 	if roomPayload := promotion["room"].(map[string]any); roomPayload["name"] != "Event Room" || roomPayload["description"] != "Room event bio" {
 		t.Fatalf("promotion should include room payload: %v", promotion)
 	}

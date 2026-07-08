@@ -361,6 +361,20 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 	if err != nil {
 		return gin.H{"id": notificationID}
 	}
+	if !messageID.Valid || strings.TrimSpace(messageID.String) == "" {
+		if resolvedMessageID, ok := h.resolveRoomNotificationMessageID(
+			id,
+			eventType,
+			roomID,
+			viewerID,
+			actorRefID,
+			fromRole,
+			toRole,
+			createdAt,
+		); ok {
+			messageID = sql.NullString{String: resolvedMessageID, Valid: true}
+		}
+	}
 
 	var actor any
 	actorExists := true
@@ -413,5 +427,102 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 			roomCreatedByUserID, roomExists != 0,
 		),
 		"actor": actor,
+	}
+}
+
+func (h *Handler) resolveRoomNotificationMessageID(
+	notificationID string,
+	notificationType string,
+	roomID string,
+	recipientID string,
+	actorID sql.NullString,
+	fromRole sql.NullString,
+	toRole sql.NullString,
+	notificationCreatedAt int64,
+) (string, bool) {
+	systemEvent, ok := roomNotificationSystemEvent(notificationType)
+	if !ok || roomID == "" || recipientID == "" {
+		return "", false
+	}
+
+	conditions := []string{
+		"m.room_id = ?",
+		"m.type = ?",
+		"m.is_recalled = 0",
+		"m.is_force_deleted = 0",
+		"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].type')) = ?",
+		"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].event')) = ?",
+		"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].target.id')) = ?",
+	}
+	args := []any{
+		roomID,
+		systemMessageType,
+		systemMessageType,
+		systemEvent,
+		recipientID,
+	}
+	if actorID.Valid && strings.TrimSpace(actorID.String) != "" {
+		conditions = append(
+			conditions,
+			"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].actor.id')) = ?",
+		)
+		args = append(args, actorID.String)
+	}
+	if notificationType == roomNotificationRolePromoted ||
+		notificationType == roomNotificationRoleDemoted ||
+		notificationType == roomNotificationCreatorTransferDemoted {
+		if !fromRole.Valid || !toRole.Valid {
+			return "", false
+		}
+		conditions = append(
+			conditions,
+			"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].from_role')) = ?",
+			"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].to_role')) = ?",
+		)
+		args = append(args, fromRole.String, toRole.String)
+	}
+	if notificationCreatedAt > 0 {
+		conditions = append(
+			conditions,
+			"m.created_at BETWEEN ? AND ?",
+		)
+		args = append(
+			args,
+			notificationCreatedAt-10*60*1000,
+			notificationCreatedAt+10*60*1000,
+		)
+	}
+
+	query := `SELECT m.id
+	 FROM messages m
+	 WHERE ` + strings.Join(conditions, " AND ") + `
+	 ORDER BY ABS(m.created_at - ?) ASC
+	 LIMIT 1`
+	args = append(args, notificationCreatedAt)
+
+	var messageID string
+	if err := h.DB.QueryRow(query, args...).Scan(&messageID); err != nil {
+		return "", false
+	}
+	_, _ = h.DB.Exec(
+		`UPDATE room_notifications
+		 SET message_id = ?
+		 WHERE id = ? AND (message_id IS NULL OR message_id = '')`,
+		messageID,
+		notificationID,
+	)
+	return messageID, true
+}
+
+func roomNotificationSystemEvent(notificationType string) (string, bool) {
+	switch notificationType {
+	case roomNotificationMemberRemoved:
+		return systemEventRoomMemberRemoved, true
+	case roomNotificationRolePromoted,
+		roomNotificationRoleDemoted,
+		roomNotificationCreatorTransferDemoted:
+		return systemEventRoomRoleChanged, true
+	default:
+		return "", false
 	}
 }
