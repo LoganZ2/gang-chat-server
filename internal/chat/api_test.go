@@ -1955,6 +1955,19 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 	roomID := room["id"].(string)
 	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	var listed map[string]any
+	for _, candidate := range response["rooms"].([]any) {
+		roomCard := candidate.(map[string]any)
+		if roomCard["id"] == roomID {
+			listed = roomCard
+			break
+		}
+	}
+	if listed == nil || listed["ai_voice_announcements_enabled"] != false {
+		t.Fatalf("room card should expose the AI voice announcement switch: %v", response)
+	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID, owner.Token, map[string]any{
 		"name":                           "Managed",
