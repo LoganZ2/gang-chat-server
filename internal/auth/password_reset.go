@@ -23,7 +23,7 @@ import (
 
 const (
 	passwordResetCodeTTL     = 10 * time.Minute
-	passwordResetResendDelay = 59 * time.Second
+	passwordResetResendDelay = 60 * time.Second
 	passwordResetTokenTTL    = 10 * time.Minute
 	passwordResetMaxAttempts = 5
 )
@@ -40,6 +40,10 @@ type passwordResetChallenge struct {
 	Attempts          int
 	VerifiedAt        sql.NullInt64
 	ConsumedAt        sql.NullInt64
+}
+
+type passwordResetQueryer interface {
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 func (h *Handler) ensurePasswordResetSchema() error {
@@ -74,21 +78,28 @@ func (h *Handler) ensurePasswordResetSchema() error {
 	return err
 }
 
-func (h *Handler) startPasswordReset(c *gin.Context) {
+func (h *Handler) passwordResetUser(c *gin.Context, login string) (*model.User, bool) {
+	user, err := model.GetUserByUsernameOrEmail(h.DB, strings.TrimSpace(login))
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (user.Status != "active" || user.DeletedAt.Valid)) {
+		errorJSON(c, http.StatusNotFound, "account_not_found", "该用户名或邮箱对应的账号不存在")
+		return nil, false
+	}
+	if err != nil {
+		log.Printf("password reset: account lookup failed request_id=%q: %v", c.GetString("request_id"), err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法检查账号")
+		return nil, false
+	}
+	return user, true
+}
+
+func (h *Handler) inspectPasswordReset(c *gin.Context) {
 	var req StartPasswordResetRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errorJSON(c, http.StatusBadRequest, "bad_request", "请输入用户名或邮箱")
 		return
 	}
-	login := strings.TrimSpace(req.Login)
-	user, err := model.GetUserByUsernameOrEmail(h.DB, login)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && (user.Status != "active" || user.DeletedAt.Valid)) {
-		errorJSON(c, http.StatusNotFound, "account_not_found", "该用户名或邮箱对应的账号不存在")
-		return
-	}
-	if err != nil {
-		log.Printf("password reset start: lookup failed request_id=%q: %v", c.GetString("request_id"), err)
-		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法检查账号")
+	user, ok := h.passwordResetUser(c, req.Login)
+	if !ok {
 		return
 	}
 	if h.PasswordResetEmailSender == nil {
@@ -97,31 +108,125 @@ func (h *Handler) startPasswordReset(c *gin.Context) {
 	}
 
 	now := time.Now().Unix()
-	if existing, err := h.latestActivePasswordReset(user.ID); err == nil && existing.ExpiresAt > now && existing.ResendAvailableAt > now {
-		c.JSON(http.StatusOK, passwordResetChallengeResponse(existing, now))
+	latest, err := latestPasswordReset(h.DB, user.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusOK, PasswordResetInspectionResponse{
+			CanSend:     true,
+			MaskedEmail: maskEmail(user.Email),
+		})
 		return
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Printf("password reset start: existing challenge query failed user_id=%q: %v", user.ID, err)
+	}
+	if err != nil {
+		log.Printf("password reset inspect: challenge query failed user_id=%q: %v", user.ID, err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法检查验证码发送状态")
+		return
+	}
+	if latest.ResendAvailableAt <= now {
+		c.JSON(http.StatusOK, PasswordResetInspectionResponse{
+			CanSend:     true,
+			MaskedEmail: maskEmail(user.Email),
+		})
+		return
+	}
+	var challengeID *string
+	if passwordResetChallengeCanContinue(latest, user.Email, now) {
+		challengeID = &latest.ID
+	}
+	c.JSON(http.StatusOK, PasswordResetInspectionResponse{
+		CanSend:     false,
+		ChallengeID: challengeID,
+		MaskedEmail: maskEmail(user.Email),
+		RetryAfter:  passwordResetRetryAfter(latest, now),
+	})
+}
+
+func (h *Handler) startPasswordReset(c *gin.Context) {
+	var req StartPasswordResetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, "bad_request", "请输入用户名或邮箱")
+		return
+	}
+	user, ok := h.passwordResetUser(c, req.Login)
+	if !ok {
+		return
+	}
+	if h.PasswordResetEmailSender == nil {
+		errorJSON(c, http.StatusServiceUnavailable, "email_unavailable", "邮件发送服务尚未配置")
+		return
+	}
+
+	tx, err := h.DB.Begin()
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法发送验证码")
+		return
+	}
+	defer tx.Rollback()
+	var currentEmail, currentEmailNormalized, status string
+	var deletedAt sql.NullInt64
+	err = tx.QueryRow(
+		`SELECT email, email_normalized, status, deleted_at FROM users WHERE id = ? FOR UPDATE`,
+		user.ID,
+	).Scan(&currentEmail, &currentEmailNormalized, &status, &deletedAt)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (status != "active" || deletedAt.Valid)) {
+		errorJSON(c, http.StatusNotFound, "account_not_found", "该用户名或邮箱对应的账号不存在")
+		return
+	}
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法发送验证码")
+		return
+	}
+	user.Email = currentEmail
+	user.EmailNormalized = currentEmailNormalized
+
+	nowTime := time.Now()
+	now := nowTime.Unix()
+	latest, err := latestPasswordReset(tx, user.ID)
+	if err == nil && latest.ResendAvailableAt > now {
+		if passwordResetChallengeCanContinue(latest, user.Email, now) {
+			c.JSON(http.StatusOK, passwordResetChallengeResponse(latest, now))
+			return
+		}
+		errorJSON(c, http.StatusTooManyRequests, "password_reset_cooldown", fmt.Sprintf("验证码已发送，请在 %d 秒后重试", passwordResetRetryAfter(latest, now)))
+		return
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("password reset start: cooldown query failed user_id=%q: %v", user.ID, err)
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法发送验证码")
 		return
 	}
 
-	challenge, code, err := h.createPasswordResetChallenge(user)
+	challenge, code, err := h.newPasswordResetChallenge(user, nowTime)
 	if err != nil {
 		log.Printf("password reset start: challenge create failed user_id=%q: %v", user.ID, err)
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法发送验证码")
 		return
 	}
+	if _, err := tx.Exec(
+		`INSERT INTO password_reset_challenges
+		 (id, user_id, email, code_hash, expires_at, resend_available_at, attempts, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		challenge.ID, challenge.UserID, challenge.Email, challenge.CodeHash, challenge.ExpiresAt, challenge.ResendAvailableAt, now, now,
+	); err != nil {
+		log.Printf("password reset start: challenge insert failed user_id=%q: %v", user.ID, err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法发送验证码")
+		return
+	}
 	if err := h.PasswordResetEmailSender.SendPasswordResetCode(c.Request.Context(), user.Email, code); err != nil {
-		_, _ = h.DB.Exec(`DELETE FROM password_reset_challenges WHERE id = ?`, challenge.ID)
 		log.Printf("password reset start: email failed user_id=%q request_id=%q: %v", user.ID, c.GetString("request_id"), err)
 		errorJSON(c, http.StatusServiceUnavailable, "email_send_failed", "验证码发送失败，请稍后重试")
 		return
 	}
-	_, _ = h.DB.Exec(
+	if _, err := tx.Exec(
 		`UPDATE password_reset_challenges SET consumed_at = ?, updated_at = ? WHERE user_id = ? AND id != ? AND consumed_at IS NULL`,
 		now, now, user.ID, challenge.ID,
-	)
+	); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法保存验证码")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法保存验证码")
+		return
+	}
 	c.JSON(http.StatusOK, passwordResetChallengeResponse(challenge, now))
 }
 
@@ -140,17 +245,41 @@ func (h *Handler) resendPasswordResetCode(c *gin.Context) {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法重新发送验证码")
 		return
 	}
-	now := time.Now().Unix()
+	if h.PasswordResetEmailSender == nil {
+		errorJSON(c, http.StatusServiceUnavailable, "email_unavailable", "邮件发送服务尚未配置")
+		return
+	}
+	tx, err := h.DB.Begin()
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法重新发送验证码")
+		return
+	}
+	defer tx.Rollback()
+	var currentEmail, status string
+	var deletedAt sql.NullInt64
+	if err := tx.QueryRow(
+		`SELECT email, status, deleted_at FROM users WHERE id = ? FOR UPDATE`, challenge.UserID,
+	).Scan(&currentEmail, &status, &deletedAt); err != nil || status != "active" || deletedAt.Valid {
+		errorJSON(c, http.StatusGone, "challenge_expired", "验证码已失效，请重新发起密码重置")
+		return
+	}
+	challenge, err = passwordResetChallengeByID(tx, strings.TrimSpace(req.ChallengeID))
+	if err != nil {
+		errorJSON(c, http.StatusGone, "challenge_expired", "验证码已失效，请重新发起密码重置")
+		return
+	}
+	nowTime := time.Now()
+	now := nowTime.Unix()
 	if challenge.ConsumedAt.Valid || challenge.VerifiedAt.Valid || challenge.ExpiresAt <= now {
 		errorJSON(c, http.StatusGone, "challenge_expired", "验证码已失效，请重新发起密码重置")
 		return
 	}
-	if challenge.ResendAvailableAt > now {
-		c.JSON(http.StatusOK, passwordResetChallengeResponse(challenge, now))
+	if !strings.EqualFold(strings.TrimSpace(challenge.Email), strings.TrimSpace(currentEmail)) {
+		errorJSON(c, http.StatusGone, "challenge_expired", "绑定邮箱已变更，请重新发起密码重置")
 		return
 	}
-	if h.PasswordResetEmailSender == nil {
-		errorJSON(c, http.StatusServiceUnavailable, "email_unavailable", "邮件发送服务尚未配置")
+	if challenge.ResendAvailableAt > now {
+		c.JSON(http.StatusOK, passwordResetChallengeResponse(challenge, now))
 		return
 	}
 	code, err := randomNumericCode()
@@ -159,9 +288,14 @@ func (h *Handler) resendPasswordResetCode(c *gin.Context) {
 		return
 	}
 	challenge.CodeHash = h.passwordResetCodeHash(challenge.ID, code)
-	challenge.ExpiresAt = time.Now().Add(passwordResetCodeTTL).Unix()
-	challenge.ResendAvailableAt = time.Now().Add(passwordResetResendDelay).Unix()
-	res, err := h.DB.Exec(
+	challenge.ExpiresAt = nowTime.Add(passwordResetCodeTTL).Unix()
+	challenge.ResendAvailableAt = nowTime.Add(passwordResetResendDelay).Unix()
+	if err := h.PasswordResetEmailSender.SendPasswordResetCode(c.Request.Context(), challenge.Email, code); err != nil {
+		log.Printf("password reset resend: email failed challenge_id=%q: %v", challenge.ID, err)
+		errorJSON(c, http.StatusServiceUnavailable, "email_send_failed", "验证码发送失败，请稍后重试")
+		return
+	}
+	res, err := tx.Exec(
 		`UPDATE password_reset_challenges SET code_hash = ?, expires_at = ?, resend_available_at = ?, attempts = 0, updated_at = ?
 		 WHERE id = ? AND consumed_at IS NULL AND verified_at IS NULL`,
 		challenge.CodeHash, challenge.ExpiresAt, challenge.ResendAvailableAt, now, challenge.ID,
@@ -174,10 +308,8 @@ func (h *Handler) resendPasswordResetCode(c *gin.Context) {
 		errorJSON(c, http.StatusGone, "challenge_expired", "验证码已失效，请重新发起密码重置")
 		return
 	}
-	if err := h.PasswordResetEmailSender.SendPasswordResetCode(c.Request.Context(), challenge.Email, code); err != nil {
-		_, _ = h.DB.Exec(`UPDATE password_reset_challenges SET consumed_at = ?, updated_at = ? WHERE id = ?`, now, now, challenge.ID)
-		log.Printf("password reset resend: email failed challenge_id=%q: %v", challenge.ID, err)
-		errorJSON(c, http.StatusServiceUnavailable, "email_send_failed", "验证码发送失败，请重新发起密码重置")
+	if err := tx.Commit(); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法保存验证码")
 		return
 	}
 	c.JSON(http.StatusOK, passwordResetChallengeResponse(challenge, now))
@@ -370,32 +502,35 @@ func (h *Handler) hasPasswordResetGrant(sessionID string, user *model.User) (boo
 	return granted != 0, err
 }
 
-func (h *Handler) latestActivePasswordReset(userID string) (*passwordResetChallenge, error) {
+func latestPasswordReset(queryer passwordResetQueryer, userID string) (*passwordResetChallenge, error) {
 	challenge := &passwordResetChallenge{}
-	err := h.DB.QueryRow(
+	err := queryer.QueryRow(
 		`SELECT id, user_id, email, code_hash, expires_at, resend_available_at, attempts, verified_at, consumed_at
-		 FROM password_reset_challenges WHERE user_id = ? AND consumed_at IS NULL AND verified_at IS NULL
-		 ORDER BY created_at DESC LIMIT 1`,
+		 FROM password_reset_challenges WHERE user_id = ?
+		 ORDER BY created_at DESC, updated_at DESC LIMIT 1`,
 		userID,
 	).Scan(&challenge.ID, &challenge.UserID, &challenge.Email, &challenge.CodeHash, &challenge.ExpiresAt, &challenge.ResendAvailableAt, &challenge.Attempts, &challenge.VerifiedAt, &challenge.ConsumedAt)
 	return challenge, err
 }
 
 func (h *Handler) getPasswordResetChallenge(id string) (*passwordResetChallenge, error) {
+	return passwordResetChallengeByID(h.DB, id)
+}
+
+func passwordResetChallengeByID(queryer passwordResetQueryer, id string) (*passwordResetChallenge, error) {
 	challenge := &passwordResetChallenge{}
-	err := h.DB.QueryRow(
+	err := queryer.QueryRow(
 		`SELECT id, user_id, email, code_hash, expires_at, resend_available_at, attempts, verified_at, consumed_at
 		 FROM password_reset_challenges WHERE id = ?`, id,
 	).Scan(&challenge.ID, &challenge.UserID, &challenge.Email, &challenge.CodeHash, &challenge.ExpiresAt, &challenge.ResendAvailableAt, &challenge.Attempts, &challenge.VerifiedAt, &challenge.ConsumedAt)
 	return challenge, err
 }
 
-func (h *Handler) createPasswordResetChallenge(user *model.User) (*passwordResetChallenge, string, error) {
+func (h *Handler) newPasswordResetChallenge(user *model.User, now time.Time) (*passwordResetChallenge, string, error) {
 	code, err := randomNumericCode()
 	if err != nil {
 		return nil, "", err
 	}
-	now := time.Now()
 	challenge := &passwordResetChallenge{
 		ID:                uuid.NewString(),
 		UserID:            user.ID,
@@ -404,16 +539,22 @@ func (h *Handler) createPasswordResetChallenge(user *model.User) (*passwordReset
 		ResendAvailableAt: now.Add(passwordResetResendDelay).Unix(),
 	}
 	challenge.CodeHash = h.passwordResetCodeHash(challenge.ID, code)
-	_, err = h.DB.Exec(
-		`INSERT INTO password_reset_challenges
-		 (id, user_id, email, code_hash, expires_at, resend_available_at, attempts, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-		challenge.ID, challenge.UserID, challenge.Email, challenge.CodeHash, challenge.ExpiresAt, challenge.ResendAvailableAt, now.Unix(), now.Unix(),
-	)
-	if err != nil {
-		return nil, "", err
-	}
 	return challenge, code, nil
+}
+
+func passwordResetChallengeCanContinue(challenge *passwordResetChallenge, email string, now int64) bool {
+	return !challenge.ConsumedAt.Valid &&
+		!challenge.VerifiedAt.Valid &&
+		challenge.ExpiresAt > now &&
+		strings.EqualFold(strings.TrimSpace(challenge.Email), strings.TrimSpace(email))
+}
+
+func passwordResetRetryAfter(challenge *passwordResetChallenge, now int64) int64 {
+	retryAfter := challenge.ResendAvailableAt - now
+	if retryAfter < 0 {
+		return 0
+	}
+	return retryAfter
 }
 
 func (h *Handler) passwordResetCodeHash(challengeID, code string) string {
@@ -423,14 +564,10 @@ func (h *Handler) passwordResetCodeHash(challengeID, code string) string {
 }
 
 func passwordResetChallengeResponse(challenge *passwordResetChallenge, now int64) PasswordResetChallengeResponse {
-	retryAfter := challenge.ResendAvailableAt - now
-	if retryAfter < 0 {
-		retryAfter = 0
-	}
 	return PasswordResetChallengeResponse{
 		ChallengeID: challenge.ID,
 		MaskedEmail: maskEmail(challenge.Email),
-		RetryAfter:  retryAfter,
+		RetryAfter:  passwordResetRetryAfter(challenge, now),
 	}
 }
 

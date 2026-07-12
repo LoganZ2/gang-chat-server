@@ -1,11 +1,14 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
@@ -62,7 +65,25 @@ func TestResendPasswordResetEmailSender(t *testing.T) {
 	if authorization != "Bearer resend-key" {
 		t.Fatalf("authorization = %q", authorization)
 	}
-	if payload["from"] != "Gang Chat <no-reply@example.com>" || payload["subject"] != "Gang Chat 密码重置验证码" {
+	if payload["from"] != "Gang Chat <no-reply@example.com>" || payload["subject"] != "Gang Chat｜密码重置验证码" {
 		t.Fatalf("unexpected payload: %v", payload)
+	}
+	htmlBody, _ := payload["html"].(string)
+	if !strings.Contains(htmlBody, "cid:gang-chat-logo") ||
+		!strings.Contains(htmlBody, "#181c24") ||
+		!strings.Contains(htmlBody, "123456") {
+		t.Fatalf("email HTML does not contain the branded template: %s", htmlBody)
+	}
+	attachments, _ := payload["attachments"].([]any)
+	if len(attachments) != 1 {
+		t.Fatalf("want one inline logo attachment, got %v", payload["attachments"])
+	}
+	logo, _ := attachments[0].(map[string]any)
+	if logo["content_id"] != "gang-chat-logo" || logo["content_type"] != "image/png" || logo["content"] == "" {
+		t.Fatalf("unexpected inline logo: %v", logo)
+	}
+	logoBytes, err := base64.StdEncoding.DecodeString(logo["content"].(string))
+	if err != nil || !bytes.HasPrefix(logoBytes, []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatalf("inline logo is not a valid PNG: %v", err)
 	}
 }

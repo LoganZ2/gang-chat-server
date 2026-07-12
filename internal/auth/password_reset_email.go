@@ -42,16 +42,20 @@ func newPasswordResetEmailSender(cfg *config.Config) PasswordResetEmailSender {
 }
 
 func (s *resendPasswordResetEmailSender) SendPasswordResetCode(ctx context.Context, to, code string) error {
-	escapedCode := html.EscapeString(code)
 	payload, err := json.Marshal(map[string]any{
 		"from":    s.from,
 		"to":      []string{to},
-		"subject": "Gang Chat 密码重置验证码",
+		"subject": "Gang Chat｜密码重置验证码",
 		"text":    fmt.Sprintf("您的 Gang Chat 密码重置验证码是 %s。验证码 10 分钟内有效。如果不是您本人操作，请忽略此邮件。", code),
-		"html": fmt.Sprintf(
-			`<div style="font-family:Arial,sans-serif;color:#20242c"><h2>重置 Gang Chat 密码</h2><p>您的验证码是：</p><p style="font-size:28px;font-weight:700;letter-spacing:6px">%s</p><p>验证码 10 分钟内有效。如果不是您本人操作，请忽略此邮件。</p></div>`,
-			escapedCode,
-		),
+		"html":    passwordResetEmailHTML(code),
+		"attachments": []map[string]string{
+			{
+				"content":      passwordResetLogoBase64,
+				"filename":     "gang-chat.png",
+				"content_id":   "gang-chat-logo",
+				"content_type": "image/png",
+			},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("encode Resend request: %w", err)
@@ -75,4 +79,40 @@ func (s *resendPasswordResetEmailSender) SendPasswordResetCode(ctx context.Conte
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	return fmt.Errorf("Resend rejected password-reset email: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
+func passwordResetEmailHTML(code string) string {
+	escapedCode := html.EscapeString(code)
+	return fmt.Sprintf(`<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#101319;color:#eceff1;font-family:'Segoe UI','Microsoft YaHei',Arial,sans-serif;">
+  <div style="display:none;max-height:0;overflow:hidden;color:transparent;">您的 Gang Chat 密码重置验证码是 %s</div>
+  <table role="presentation" width="100%%" cellspacing="0" cellpadding="0" border="0" style="background:#101319;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%%" cellspacing="0" cellpadding="0" border="0" style="max-width:520px;background:#181c24;border:1px solid #2a2f38;border-radius:16px;overflow:hidden;box-shadow:0 18px 42px rgba(0,0,0,.32);">
+        <tr><td style="padding:26px 30px 22px;border-bottom:1px solid #2a2f38;">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr>
+            <td style="padding-right:13px;vertical-align:middle;"><img src="cid:gang-chat-logo" width="44" height="44" alt="Gang Chat" style="display:block;width:44px;height:44px;border:0;"></td>
+            <td style="vertical-align:middle;"><div style="font-size:22px;line-height:28px;font-weight:700;color:#eceff1;">Gang Chat</div><div style="font-size:12px;line-height:18px;color:#6f7785;">账号安全验证</div></td>
+          </tr></table>
+        </td></tr>
+        <tr><td style="padding:30px;">
+          <div style="font-size:20px;line-height:28px;font-weight:700;color:#eceff1;">重置您的密码</div>
+          <div style="margin-top:10px;font-size:14px;line-height:22px;color:#b0b8c0;">请在 Gang Chat 的邮箱验证窗口中输入以下验证码</div>
+          <div style="margin-top:22px;padding:18px 16px;text-align:center;background:#13241e;border:1px solid #34765d;border-radius:12px;">
+            <div style="font-size:12px;line-height:18px;color:#6fcfa6;letter-spacing:1px;">验证码</div>
+            <div style="margin-top:6px;font-size:32px;line-height:40px;font-weight:700;letter-spacing:8px;color:#6fcfa6;">%s</div>
+          </div>
+          <div style="margin-top:20px;padding:12px 14px;background:#14171d;border-radius:10px;font-size:13px;line-height:21px;color:#b0b8c0;">
+            验证码将在 <strong style="color:#eceff1;">10 分钟</strong>后失效。请勿将验证码告诉任何人，Gang Chat 工作人员不会向您索取验证码。
+          </div>
+          <div style="margin-top:20px;font-size:12px;line-height:19px;color:#6f7785;">如果不是您本人发起的密码重置，可以忽略此邮件，您的密码不会被更改。</div>
+        </td></tr>
+        <tr><td style="padding:16px 30px;background:#14171d;border-top:1px solid #2a2f38;font-size:11px;line-height:18px;color:#6f7785;text-align:center;">此邮件由 Gang Chat 账号安全服务自动发送</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`, escapedCode, escapedCode)
 }

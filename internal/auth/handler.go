@@ -60,6 +60,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) *Handler
 	auth.POST("/login", h.login)
 	auth.POST("/refresh", h.refresh)
 	auth.POST("/logout", h.logout)
+	auth.POST("/password-reset/inspect", h.inspectPasswordReset)
 	auth.POST("/password-reset/start", h.startPasswordReset)
 	auth.POST("/password-reset/resend", h.resendPasswordResetCode)
 	auth.POST("/password-reset/verify", h.verifyPasswordResetCode)

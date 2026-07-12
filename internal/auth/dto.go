@@ -53,6 +53,13 @@ type PasswordResetChallengeResponse struct {
 	RetryAfter  int64  `json:"retry_after"`
 }
 
+type PasswordResetInspectionResponse struct {
+	CanSend     bool    `json:"can_send"`
+	ChallengeID *string `json:"challenge_id,omitempty"`
+	MaskedEmail string  `json:"masked_email"`
+	RetryAfter  int64   `json:"retry_after"`
+}
+
 type PasswordResetVerificationResponse struct {
 	ResetToken string `json:"reset_token"`
 }

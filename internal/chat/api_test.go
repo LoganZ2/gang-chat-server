@@ -350,11 +350,19 @@ func TestPasswordResetFlow(t *testing.T) {
 	api := newAPIHarness(t)
 	api.register("password_reset_user")
 
-	status, response := api.request(http.MethodPost, "/auth/password-reset/start", "", map[string]any{
+	status, response := api.request(http.MethodPost, "/auth/password-reset/inspect", "", map[string]any{
 		"login": "missing_password_reset_user",
 	})
 	if status != http.StatusNotFound || response["error"].(map[string]any)["code"] != "account_not_found" {
 		t.Fatalf("missing account should be explicit: status=%d response=%v", status, response)
+	}
+
+	status, response = api.request(http.MethodPost, "/auth/password-reset/inspect", "", map[string]any{
+		"login": "password_reset_user",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if response["can_send"] != true || response["retry_after"].(float64) != 0 {
+		t.Fatalf("first inspection should allow sending: %v", response)
 	}
 
 	status, response = api.request(http.MethodPost, "/auth/password-reset/start", "", map[string]any{
@@ -367,6 +375,13 @@ func TestPasswordResetFlow(t *testing.T) {
 	}
 	if len(api.passwordResetEmail.sent) != 1 {
 		t.Fatalf("want one email, got %d", len(api.passwordResetEmail.sent))
+	}
+	status, inspected := api.request(http.MethodPost, "/auth/password-reset/inspect", "", map[string]any{
+		"login": "password_reset_user@example.com",
+	})
+	api.requireStatus(status, http.StatusOK, inspected)
+	if inspected["can_send"] != false || inspected["challenge_id"] != challengeID || inspected["retry_after"].(float64) <= 0 {
+		t.Fatalf("inspection should inherit the user's cooldown: %v", inspected)
 	}
 
 	status, repeated := api.request(http.MethodPost, "/auth/password-reset/start", "", map[string]any{
