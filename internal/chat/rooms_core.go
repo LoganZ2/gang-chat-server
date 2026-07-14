@@ -53,7 +53,7 @@ func (h *Handler) listRooms(c *gin.Context) {
 	latestMessageTimeSQL := `(SELECT m.created_at
 			   FROM messages m
 			   WHERE m.room_id = r.id AND ` + visibleMessageSQL("m") + `
-			   ORDER BY m.created_at DESC
+			   ORDER BY m.created_at DESC, m.id DESC
 			   LIMIT 1)`
 
 	var rows *sql.Rows
@@ -620,7 +620,7 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 		 JOIN users u ON u.id = m.sender_user_id
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 WHERE m.room_id = ? AND `+visibleMessageSQL("m")+`
-		 ORDER BY m.created_at DESC
+		 ORDER BY m.created_at DESC, m.id DESC
 		 LIMIT 1`,
 		roomID,
 	).Scan(
@@ -945,19 +945,22 @@ func (h *Handler) unreadCount(roomID, userID string) int {
 	}
 
 	var readAt int64
+	var readMessageID string
 	_ = h.DB.QueryRow(
-		`SELECT m.created_at
+		`SELECT m.created_at, m.id
 		 FROM room_reads rr
 		 JOIN messages m ON m.id = rr.last_read_message_id
 		 WHERE rr.room_id = ? AND rr.user_id = ?`,
 		roomID, userID,
-	).Scan(&readAt)
+	).Scan(&readAt, &readMessageID)
 
 	var count int
 	_ = h.DB.QueryRow(
 		`SELECT COUNT(*) FROM messages m
-		 WHERE m.room_id = ? AND m.sender_user_id != ? AND m.created_at > ? AND `+visibleMessageSQL("m"),
-		roomID, userID, readAt,
+		 WHERE m.room_id = ? AND m.sender_user_id != ?
+		   AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))
+		   AND `+visibleMessageSQL("m"),
+		roomID, userID, readAt, readAt, readMessageID,
 	).Scan(&count)
 	return count
 }
@@ -978,21 +981,23 @@ func (h *Handler) unreadMentionCount(roomID, userID string) int {
 	}
 
 	var readAt int64
+	var readMessageID string
 	_ = h.DB.QueryRow(
-		`SELECT m.created_at
+		`SELECT m.created_at, m.id
 		 FROM room_reads rr
 		 JOIN messages m ON m.id = rr.last_read_message_id
 		 WHERE rr.room_id = ? AND rr.user_id = ?`,
 		roomID, userID,
-	).Scan(&readAt)
+	).Scan(&readAt, &readMessageID)
 
 	rows, err := h.DB.Query(
 		`SELECT m.body, m.mentions_json
 		 FROM messages m
-		 WHERE m.room_id = ? AND m.sender_user_id != ? AND m.created_at > ?
+		 WHERE m.room_id = ? AND m.sender_user_id != ?
+		   AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))
 		   AND m.is_recalled = 0 AND m.is_force_deleted = 0
 		   AND `+visibleMessageSQL("m"),
-		roomID, userID, readAt,
+		roomID, userID, readAt, readAt, readMessageID,
 	)
 	if err != nil {
 		return 0

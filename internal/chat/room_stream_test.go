@@ -2,6 +2,7 @@ package chat
 
 import (
 	"net/http"
+	"sort"
 	"testing"
 	"time"
 
@@ -311,6 +312,98 @@ func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 	snap = updated["snapshot"].(roomSnapshot)
 	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != `[语音] 15"` {
 		t.Fatalf("room_updated should label voice last_message: %+v", snap.LastMessage)
+	}
+}
+
+func TestMarkReadIsMonotonicAndSyncsEveryDevice(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("read_sync_owner")
+	member := api.register("read_sync_member")
+	roomCard := api.createRoom(owner.Token, map[string]any{
+		"name":        "Read Sync",
+		"join_policy": "open",
+	})
+	roomID := roomCard["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	first := api.sendMessage(owner.Token, roomID, "first")
+	second := api.sendMessage(owner.Token, roomID, "second")
+	messageIDs := []string{first["id"].(string), second["id"].(string)}
+	sort.Strings(messageIDs)
+	olderID, newerID := messageIDs[0], messageIDs[1]
+	// Exercise the deterministic id tie-breaker used when messages land in the
+	// same millisecond. The lexicographically larger id is later in the list.
+	sharedCreatedAt := nowMillis() - 1000
+	if _, err := api.db.Exec(
+		`UPDATE messages SET created_at = ? WHERE id IN (?, ?)`,
+		sharedCreatedAt,
+		olderID,
+		newerID,
+	); err != nil {
+		t.Fatalf("align message timestamps: %v", err)
+	}
+
+	deviceOne := api.connectStream(member.User["id"].(string))
+	deviceTwo := api.connectStream(member.User["id"].(string))
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/read", member.Token, map[string]any{
+		"last_read_message_id": newerID,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if response["unread_count"] != float64(0) {
+		t.Fatalf("newest cursor should clear unread messages: %v", response)
+	}
+	if got := deviceOne.await("room_updated")["snapshot"].(roomSnapshot).UnreadCount; got != 0 {
+		t.Fatalf("device one should receive the cleared count, got %d", got)
+	}
+	if got := deviceTwo.await("room_updated")["snapshot"].(roomSnapshot).UnreadCount; got != 0 {
+		t.Fatalf("device two should receive the cleared count, got %d", got)
+	}
+
+	// A stale device must not move the account cursor backwards.
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/read", member.Token, map[string]any{
+		"last_read_message_id": olderID,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if response["unread_count"] != float64(0) {
+		t.Fatalf("stale cursor should be ignored: %v", response)
+	}
+	if got := deviceOne.await("room_updated")["snapshot"].(roomSnapshot).UnreadCount; got != 0 {
+		t.Fatalf("device one should retain the committed cursor, got %d", got)
+	}
+	if got := deviceTwo.await("room_updated")["snapshot"].(roomSnapshot).UnreadCount; got != 0 {
+		t.Fatalf("device two should retain the committed cursor, got %d", got)
+	}
+	var storedCursor string
+	if err := api.db.QueryRow(
+		`SELECT last_read_message_id FROM room_reads WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		member.User["id"].(string),
+	).Scan(&storedCursor); err != nil {
+		t.Fatalf("read stored cursor: %v", err)
+	}
+	if storedCursor != newerID {
+		t.Fatalf("stale device regressed cursor: got %q want %q", storedCursor, newerID)
+	}
+	freshDevice := api.login("read_sync_member", "correct horse battery staple")
+	status, response = api.request(http.MethodGet, "/rooms", freshDevice.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := roomCardByID(t, response, roomID)["unread_count"]; got != float64(0) {
+		t.Fatalf("fresh login should preserve the committed read state, got %v", got)
+	}
+
+	_ = api.sendMessage(owner.Token, roomID, "third")
+	if got := deviceOne.await("room_updated")["snapshot"].(roomSnapshot).UnreadCount; got != 1 {
+		t.Fatalf("device one should see exactly one new message, got %d", got)
+	}
+	if got := deviceTwo.await("room_updated")["snapshot"].(roomSnapshot).UnreadCount; got != 1 {
+		t.Fatalf("device two should see exactly one new message, got %d", got)
+	}
+	status, response = api.request(http.MethodGet, "/rooms", freshDevice.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := roomCardByID(t, response, roomID)["unread_count"]; got != float64(1) {
+		t.Fatalf("fresh login snapshot should retain one unread message, got %v", got)
 	}
 }
 

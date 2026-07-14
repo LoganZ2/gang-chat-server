@@ -38,7 +38,7 @@ func (h *Handler) listMessages(c *gin.Context) {
 			 JOIN users u ON u.id = m.sender_user_id
 			 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 			 WHERE m.room_id = ? AND `+visibleMessageSQL("m")+`
-			 ORDER BY m.created_at DESC
+			 ORDER BY m.created_at DESC, m.id DESC
 			 LIMIT ?`,
 			roomID, limit,
 		)
@@ -61,10 +61,12 @@ func (h *Handler) listMessages(c *gin.Context) {
 				 FROM messages m
 				 JOIN users u ON u.id = m.sender_user_id
 				 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
-				 WHERE m.room_id = ? AND m.created_at < ? AND `+visibleMessageSQL("m")+`
-				 ORDER BY m.created_at DESC
+				 WHERE m.room_id = ?
+				   AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
+				   AND `+visibleMessageSQL("m")+`
+				 ORDER BY m.created_at DESC, m.id DESC
 				 LIMIT ?`,
-				roomID, beforeCreatedAt, limit,
+				roomID, beforeCreatedAt, beforeCreatedAt, before, limit,
 			)
 		}
 	}
@@ -93,9 +95,14 @@ func (h *Handler) listMessages(c *gin.Context) {
 		firstCreatedAt := parseRFC3339Millis(messages[0].CreatedAt)
 		var count int
 		_ = h.DB.QueryRow(
-			`SELECT COUNT(*) FROM messages m WHERE m.room_id = ? AND m.created_at < ? AND `+visibleMessageSQL("m"),
+			`SELECT COUNT(*) FROM messages m
+			 WHERE m.room_id = ?
+			   AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
+			   AND `+visibleMessageSQL("m"),
 			roomID,
 			firstCreatedAt,
+			firstCreatedAt,
+			firstID,
 		).Scan(&count)
 		hasMore = count > 0
 		if hasMore {
@@ -179,8 +186,8 @@ func (h *Handler) sendMessage(c *gin.Context) {
 		return
 	}
 	// last_message lives in the room-list snapshot, so a new message refreshes
-	// every member's list entry. Clients use the new last_message to bump their
-	// own unread counter; the count itself is never on the wire (it's personal).
+	// every member's list entry. Personal unread counts are added separately for
+	// each recipient while the shared snapshot is published.
 	h.publishRoomMessageUpdated(roomID, userID)
 	h.publishRoomToUser(userID, roomID, "room_updated")
 	if len(req.Mentions) > 0 {
@@ -215,26 +222,69 @@ func (h *Handler) markRead(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "bad_request", "last_read_message_id is required")
 		return
 	}
-	var exists int
-	if err := h.DB.QueryRow(`SELECT COUNT(*) FROM messages WHERE id = ? AND room_id = ?`, req.LastReadMessageID, roomID).Scan(&exists); err != nil || exists == 0 {
+	var candidateCreatedAt int64
+	if err := h.DB.QueryRow(
+		`SELECT created_at FROM messages WHERE id = ? AND room_id = ?`,
+		req.LastReadMessageID,
+		roomID,
+	).Scan(&candidateCreatedAt); errors.Is(err, sql.ErrNoRows) {
 		h.jsonError(c, http.StatusBadRequest, "bad_request", "message does not exist")
+		return
+	} else if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read message")
 		return
 	}
 
+	now := nowMillis()
+	// Ensure the per-account cursor exists first, then conditionally advance it.
+	// The UPDATE predicate is evaluated while MySQL holds the room_reads row
+	// lock, so concurrent devices can race safely: an older cursor can never
+	// overwrite a newer one. The message id is the deterministic tie-breaker
+	// used everywhere messages share the same millisecond timestamp.
 	_, err := h.DB.Exec(
 		`INSERT INTO room_reads (room_id, user_id, last_read_message_id, updated_at)
 		 VALUES (?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		   last_read_message_id = VALUES(last_read_message_id),
-		   updated_at = VALUES(updated_at)`,
-		roomID, userID, req.LastReadMessageID, nowMillis(),
+		 ON DUPLICATE KEY UPDATE updated_at = updated_at`,
+		roomID, userID, req.LastReadMessageID, now,
+	)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to mark room read")
+		return
+	}
+	_, err = h.DB.Exec(
+		`UPDATE room_reads rr
+		 LEFT JOIN messages current_message ON current_message.id = rr.last_read_message_id
+		 SET rr.last_read_message_id = ?, rr.updated_at = ?
+		 WHERE rr.room_id = ? AND rr.user_id = ?
+		   AND (
+		     current_message.id IS NULL
+		     OR current_message.created_at < ?
+		     OR (current_message.created_at = ? AND current_message.id < ?)
+		   )`,
+		req.LastReadMessageID,
+		now,
+		roomID,
+		userID,
+		candidateCreatedAt,
+		candidateCreatedAt,
+		req.LastReadMessageID,
 	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to mark room read")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"ok": true, "unread_count": h.unreadCount(roomID, userID)})
+	unreadCount := h.unreadCount(roomID, userID)
+	unreadMentionCount := h.unreadMentionCount(roomID, userID)
+	// room_updated is account-addressed, so every live connection for this
+	// user receives the committed cursor-derived counts, including the device
+	// that initiated the request.
+	h.publishRoomToUser(userID, roomID, "room_updated")
+	c.JSON(http.StatusOK, gin.H{
+		"ok":                   true,
+		"unread_count":         unreadCount,
+		"unread_mention_count": unreadMentionCount,
+	})
 }
 
 func (h *Handler) messageByID(messageID string) (message, error) {
