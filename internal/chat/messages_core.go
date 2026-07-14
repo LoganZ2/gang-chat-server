@@ -149,13 +149,37 @@ func (h *Handler) sendMessage(c *gin.Context) {
 	}
 	mentionsJSON := mustJSON(req.Mentions)
 	attachmentsJSON := mustJSON(req.Attachments)
+	var quoteJSON any
+	quoteMessageIDs := normalizedQuoteMessageIDs(req)
+	if len(quoteMessageIDs) > 50 {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "too many quoted messages")
+		return
+	}
+	quotes := make([]messageQuote, 0, len(quoteMessageIDs))
+	for _, quoteMessageID := range quoteMessageIDs {
+		quoted, quoteErr := h.messageByIDForUser(quoteMessageID, userID)
+		if quoteErr != nil || quoted.RoomID != roomID || quoted.IsRecalled || quoted.IsForceDeleted {
+			h.jsonError(c, http.StatusBadRequest, "validation_failed", "quoted message is unavailable")
+			return
+		}
+		quotes = append(quotes, messageQuote{
+			MessageID:         quoted.ID,
+			SenderDisplayName: quotedMessageSenderName(quoted),
+			Body:              quotedMessageBodySnapshot(quoted),
+			CreatedAt:         quoted.CreatedAt,
+			PreviewAttachment: quotedMessagePreviewAttachment(quoted),
+		})
+	}
+	if len(quotes) > 0 {
+		quoteJSON = mustJSON(quotes)
+	}
 
 	now := nowMillis()
 	messageID := newID("msg")
-	_, err := insertMessageWithSenderSnapshot(
+	_, err := insertMessageWithSenderSnapshotAndQuote(
 		h.DB,
 		messageID, roomID, userID, req.ClientMessageID, messageType, body,
-		mentionsJSON, attachmentsJSON, now,
+		mentionsJSON, attachmentsJSON, quoteJSON, now,
 	)
 	if err != nil {
 		existing, existingErr := h.messageByClientIDForUser(roomID, userID, req.ClientMessageID, userID)
@@ -192,6 +216,66 @@ func (h *Handler) sendMessage(c *gin.Context) {
 		}
 	}
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"message": msg})
+}
+
+func normalizedQuoteMessageIDs(req sendMessageRequest) []string {
+	values := req.QuoteMessageIDs
+	if len(values) == 0 && strings.TrimSpace(req.QuoteMessageID) != "" {
+		values = []string{req.QuoteMessageID}
+	}
+	seen := make(map[string]bool, len(values))
+	ids := make([]string, 0, len(values))
+	for _, value := range values {
+		id := strings.TrimSpace(value)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func quotedMessageSenderName(msg message) string {
+	return firstNonEmptyString(
+		dereferenceString(msg.Sender.RoomDisplayName),
+		msg.Sender.DisplayName,
+		msg.Sender.Username,
+		"用户",
+	)
+}
+
+func quotedMessageBodySnapshot(msg message) string {
+	if msg.Type == "text" || msg.Type == systemMessageType {
+		if body := strings.TrimSpace(msg.Body); body != "" {
+			return body
+		}
+	}
+	return lastMessageBodyPreview(msg.Type, msg.Body, mustJSON(msg.Attachments))
+}
+
+func quotedMessagePreviewAttachment(msg message) any {
+	for _, raw := range msg.Attachments {
+		attachment, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		attachmentType := strings.ToLower(stringFromMap(attachment, "type"))
+		if attachmentType == "sticker" {
+			return attachment
+		}
+		if attachmentType == "file" && strings.HasPrefix(strings.ToLower(attachmentMimeType(attachment)), "image/") {
+			return attachment
+		}
+	}
+	return nil
+}
+
+func dereferenceString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func (h *Handler) markRead(c *gin.Context) {
@@ -347,13 +431,14 @@ func (h *Handler) queryMessage(query string, args ...any) (message, error) {
 	var senderDisplayName, senderAvatarURL, senderDefaultAvatar sql.NullString
 	var senderRoomDisplayName, senderRoomRole sql.NullString
 	var mentionsJSON, attachmentsJSON string
+	var quoteJSON sql.NullString
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
 	var isRecalled, isForceDeleted, senderIsSuperuser, senderIsDeleted int
 	var createdAt int64
 	err := h.DB.QueryRow(query, args...).Scan(
 		&msg.ID, &msg.RoomID, &msg.ClientMessageID, &msg.Type, &msg.Body,
-		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
+		&mentionsJSON, &attachmentsJSON, &quoteJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
 		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole, &senderIsDeleted,
@@ -370,6 +455,10 @@ func (h *Handler) queryMessage(query string, args ...any) (message, error) {
 	}
 	msg.Mentions = decodeJSONArray(mentionsJSON)
 	msg.Attachments = decodeJSONArray(attachmentsJSON)
+	msg.Quotes = decodeMessageQuotes(quoteJSON)
+	if len(msg.Quotes) > 0 {
+		msg.Quote = &msg.Quotes[0]
+	}
 	msg.IsRecalled = isRecalled != 0
 	msg.IsForceDeleted = isForceDeleted != 0
 	if recalledAt.Valid {

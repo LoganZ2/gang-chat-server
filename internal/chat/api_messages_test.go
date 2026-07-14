@@ -115,6 +115,135 @@ func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
 	assertLastPreview("[表情] wave")
 }
 
+func TestMessageQuoteUsesImmutableSingleLevelSnapshot(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("quote_owner")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Quote Room",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPatch, "/rooms/"+roomID+"/me", owner.Token, map[string]any{
+		"room_display_name": "发送时房内名",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	original := api.sendTypedMessage(owner.Token, roomID, "file", "report.pdf", []any{
+		map[string]any{
+			"type": "file",
+			"name": "report.pdf",
+			"asset": map[string]any{
+				"id":        "asset_quote_file",
+				"url":       "/assets/report.pdf",
+				"mime_type": "application/pdf",
+				"filename":  "report.pdf",
+			},
+		},
+	})
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/me", owner.Token, map[string]any{
+		"room_display_name": "修改后的房内名",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages", owner.Token, map[string]any{
+		"client_message_id": "quote_reply_1",
+		"body":              "第一次回复",
+		"quote_message_id":  original["id"],
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	firstReply := response["message"].(map[string]any)
+	quote := firstReply["quote"].(map[string]any)
+	if quote["message_id"] != original["id"] ||
+		quote["sender_display_name"] != "发送时房内名" ||
+		quote["body"] != "[文件] report.pdf" || quote["created_at"] != original["created_at"] {
+		t.Fatalf("quote should snapshot original file preview, name, and time: %v", quote)
+	}
+	if _, exists := quote["preview_attachment"]; exists {
+		t.Fatalf("non-image file quote should stay text-only: %v", quote)
+	}
+
+	image := api.sendTypedMessage(owner.Token, roomID, "file", "photo.png", []any{
+		map[string]any{
+			"type": "file",
+			"name": "photo.png",
+			"asset": map[string]any{
+				"id":            "asset_quote_image",
+				"url":           "/assets/photo.png",
+				"thumbnail_url": "/assets/photo-thumb.png",
+				"mime_type":     "image/png",
+				"filename":      "photo.png",
+			},
+		},
+	})
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages", owner.Token, map[string]any{
+		"client_message_id": "quote_image_reply",
+		"body":              "图片回复",
+		"quote_message_id":  image["id"],
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	imageQuote := response["message"].(map[string]any)["quote"].(map[string]any)
+	preview := imageQuote["preview_attachment"].(map[string]any)
+	if preview["type"] != "file" || preview["name"] != "photo.png" {
+		t.Fatalf("image quote should carry a preview attachment snapshot: %v", imageQuote)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages", owner.Token, map[string]any{
+		"client_message_id": "quote_reply_2",
+		"body":              "第二次回复",
+		"quote_message_ids": []any{firstReply["id"], firstReply["id"], image["id"]},
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	secondReply := response["message"].(map[string]any)
+	nestedQuote := secondReply["quote"].(map[string]any)
+	if nestedQuote["message_id"] != firstReply["id"] || nestedQuote["body"] != "第一次回复" {
+		t.Fatalf("quoting a quoted message must snapshot only its own body: %v", nestedQuote)
+	}
+	multipleQuotes := secondReply["quotes"].([]any)
+	if len(multipleQuotes) != 2 ||
+		multipleQuotes[0].(map[string]any)["message_id"] != firstReply["id"] ||
+		multipleQuotes[1].(map[string]any)["message_id"] != image["id"] {
+		t.Fatalf("multiple quotes should preserve selection order and remove duplicates: %v", multipleQuotes)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	last := roomCardByID(t, response, roomID)["last_message"].(map[string]any)
+	if last["body_preview"] != "[引用] 第二次回复" {
+		t.Fatalf("room preview should identify quoted message: %v", last)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages/"+firstReply["id"].(string)+"/recall", owner.Token, map[string]any{
+		"reason": "test snapshot retention",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	messages := listRoomMessages(t, api, owner.Token, roomID)
+	retained := findMessageInList(t, messages, secondReply["id"].(string))
+	retainedQuote := retained["quote"].(map[string]any)
+	if retainedQuote["body"] != "第一次回复" {
+		t.Fatalf("later recall must not mutate an existing quote snapshot: %v", retainedQuote)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages", owner.Token, map[string]any{
+		"client_message_id": "quote_recalled_source",
+		"body":              "不应发送",
+		"quote_message_id":  firstReply["id"],
+	})
+	if status != http.StatusBadRequest || response["code"] != "validation_failed" {
+		t.Fatalf("recalled source should not be quotable: status=%d response=%v", status, response)
+	}
+}
+
+func findMessageInList(t *testing.T, messages []map[string]any, messageID string) map[string]any {
+	t.Helper()
+	for _, message := range messages {
+		if message["id"] == messageID {
+			return message
+		}
+	}
+	t.Fatalf("message %s not found: %v", messageID, messages)
+	return nil
+}
+
 func TestLastMessagePreviewUsesRoomDisplayName(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("last_preview_room_name_owner")

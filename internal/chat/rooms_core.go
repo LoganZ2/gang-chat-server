@@ -610,6 +610,7 @@ func (h *Handler) livePreview(roomID string) ([]userSummary, int, error) {
 func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 	var id, senderUserID, sender, messageType, body, attachmentsJSON string
 	var recalledByUserID, forceDeletedByUserID sql.NullString
+	var quoteJSON sql.NullString
 	var isRecalled, isForceDeleted bool
 	var createdAt int64
 	err := h.DB.QueryRow(
@@ -624,7 +625,7 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 		          u.username,
 		          ''
 		        ),
-		        m.type, m.body, m.attachments_json,
+		        m.type, m.body, m.attachments_json, m.quote_json,
 		        m.is_recalled, m.recalled_by_user_id,
 		        m.is_force_deleted, m.force_deleted_by_user_id,
 		        m.created_at
@@ -636,7 +637,7 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 		 LIMIT 1`,
 		roomID,
 	).Scan(
-		&id, &senderUserID, &sender, &messageType, &body, &attachmentsJSON,
+		&id, &senderUserID, &sender, &messageType, &body, &attachmentsJSON, &quoteJSON,
 		&isRecalled, &recalledByUserID,
 		&isForceDeleted, &forceDeletedByUserID,
 		&createdAt,
@@ -649,6 +650,9 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 	}
 	previewSender := sender
 	bodyPreview := lastMessageBodyPreview(messageType, body, attachmentsJSON)
+	if quoteJSON.Valid && quoteJSON.String != "" {
+		bodyPreview = "[引用] " + bodyPreview
+	}
 	if isRecalled || isForceDeleted {
 		previewSender = ""
 		messageType = systemMessageType

@@ -25,6 +25,7 @@ var messageSnapshotColumns = []messageSnapshotColumn{
 	{name: "sender_default_avatar_key_snapshot", definition: "VARCHAR(64) NOT NULL DEFAULT 'blue-3'"},
 	{name: "sender_is_superuser_snapshot", definition: "TINYINT(1) NOT NULL DEFAULT 0"},
 	{name: "sender_room_role_snapshot", definition: "VARCHAR(32) NOT NULL DEFAULT ''"},
+	{name: "quote_json", definition: "JSON NULL"},
 }
 
 // EnsureHistoricalMessageRetentionSchema upgrades existing installations so

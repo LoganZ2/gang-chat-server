@@ -446,13 +446,14 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 	var senderDisplayName, senderAvatarURL, senderDefaultAvatar, senderRoomDisplayName, senderRoomRole sql.NullString
 	var roomRID, roomAvatarURL, roomDefaultAvatar, roomRemarkName sql.NullString
 	var mentionsJSON, attachmentsJSON string
+	var quoteJSON sql.NullString
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
 	var isRecalled, isForceDeleted, senderIsSuperuser, senderIsDeleted int
 	var createdAt int64
 	if err := rows.Scan(
 		&msg.ID, &msg.RoomID, &msg.ClientMessageID, &msg.Type, &msg.Body,
-		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
+		&mentionsJSON, &attachmentsJSON, &quoteJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
 		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole, &senderIsDeleted,
@@ -471,6 +472,10 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 	}
 	msg.Mentions = decodeJSONArray(mentionsJSON)
 	msg.Attachments = decodeJSONArray(attachmentsJSON)
+	msg.Quotes = decodeMessageQuotes(quoteJSON)
+	if len(msg.Quotes) > 0 {
+		msg.Quote = &msg.Quotes[0]
+	}
 	msg.IsRecalled = isRecalled != 0
 	msg.IsForceDeleted = isForceDeleted != 0
 	if recalledAt.Valid {

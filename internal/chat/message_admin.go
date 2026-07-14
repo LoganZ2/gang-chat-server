@@ -136,7 +136,7 @@ func (h *Handler) forceDeleteMessage(c *gin.Context) {
 	messageID := c.Param("message_id")
 	stickerAssetIDs := h.messageStickerAssetIDs(messageID)
 	res, err := h.DB.Exec(
-		`UPDATE messages SET body = '', mentions_json = '[]', attachments_json = '[]',
+		`UPDATE messages SET body = '', mentions_json = '[]', attachments_json = '[]', quote_json = NULL,
 		        is_force_deleted = 1, force_deleted_at = ?, force_deleted_by_user_id = ?
 		 WHERE id = ? AND room_id = ?`,
 		nowMillis(), currentUserID(c), messageID, roomID,
@@ -163,7 +163,7 @@ func (h *Handler) applyRecall(roomID, messageID, userID string) {
 	stickerAssetIDs := h.messageStickerAssetIDs(messageID)
 	_, _ = h.DB.Exec(
 		`UPDATE messages SET body = CASE WHEN type = 'text' THEN body ELSE '' END,
-		        mentions_json = '[]', attachments_json = '[]',
+		        mentions_json = '[]', attachments_json = '[]', quote_json = NULL,
 		        is_recalled = 1, recalled_at = ?, recalled_by_user_id = ?
 		 WHERE id = ? AND room_id = ?`,
 		nowMillis(), userID, messageID, roomID,

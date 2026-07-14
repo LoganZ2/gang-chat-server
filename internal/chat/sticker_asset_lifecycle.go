@@ -160,10 +160,13 @@ func (h *Handler) stickerAssetReferenced(assetID string) (bool, error) {
 					WHERE attachment.asset_id = ?
 				)
 				OR LOCATE(?, m.attachments_json) > 0
+				OR JSON_SEARCH(m.quote_json, 'one', ?, NULL, '$[*].preview_attachment.asset.id') IS NOT NULL
+				OR JSON_UNQUOTE(JSON_EXTRACT(m.quote_json, '$.preview_attachment.asset.id')) = ?
+				OR LOCATE(?, COALESCE(m.quote_json, '')) > 0
 				OR LOCATE(?, COALESCE(m.sender_avatar_url_snapshot, '')) > 0
 				LIMIT 1
 			)`,
-			args: []any{assetID, assetURLNeedle, assetURLNeedle},
+			args: []any{assetID, assetURLNeedle, assetID, assetID, assetURLNeedle, assetURLNeedle},
 		},
 		{
 			query: `SELECT EXISTS(SELECT 1 FROM users WHERE LOCATE(?, COALESCE(avatar_url, '')) > 0 LIMIT 1)`,
@@ -291,6 +294,9 @@ func (h *Handler) reconcileUnreferencedStickerAssets(ctx context.Context) error 
 		       WHERE attachment.asset_id = lifecycle.asset_id
 		     )
 		     OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), m.attachments_json) > 0
+		     OR JSON_SEARCH(m.quote_json, 'one', lifecycle.asset_id, NULL, '$[*].preview_attachment.asset.id') IS NOT NULL
+		     OR JSON_UNQUOTE(JSON_EXTRACT(m.quote_json, '$.preview_attachment.asset.id')) = lifecycle.asset_id
+		     OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(m.quote_json, '')) > 0
 		     OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(m.sender_avatar_url_snapshot, '')) > 0
 		   )
 		   AND NOT EXISTS (
@@ -435,11 +441,22 @@ func stickerAssetIDsFromAttachments(attachments []any) []string {
 }
 
 func (h *Handler) messageStickerAssetIDs(messageID string) []string {
-	var raw string
-	if err := h.DB.QueryRow(`SELECT attachments_json FROM messages WHERE id = ?`, messageID).Scan(&raw); err != nil {
+	var attachmentsRaw string
+	var quoteRaw sql.NullString
+	if err := h.DB.QueryRow(`SELECT attachments_json, quote_json FROM messages WHERE id = ?`, messageID).Scan(&attachmentsRaw, &quoteRaw); err != nil {
 		return nil
 	}
-	return stickerAssetIDsFromAttachments(decodeJSONArray(raw))
+	return stickerAssetIDsFromMessagePayload(attachmentsRaw, quoteRaw)
+}
+
+func stickerAssetIDsFromMessagePayload(attachmentsRaw string, quoteRaw sql.NullString) []string {
+	attachments := decodeJSONArray(attachmentsRaw)
+	for _, quote := range decodeMessageQuotes(quoteRaw) {
+		if quote.PreviewAttachment != nil {
+			attachments = append(attachments, quote.PreviewAttachment)
+		}
+	}
+	return stickerAssetIDsFromAttachments(attachments)
 }
 
 func (h *Handler) stickerAssetFromMessage(roomID, messageID, stickerID string) (string, string, bool) {
@@ -483,14 +500,15 @@ func (h *Handler) stickerAssetIDsForRoom(roomID string) []string {
 		assetIDs = append(assetIDs, assetID)
 	}
 
-	rows, err := h.DB.Query(`SELECT attachments_json FROM messages WHERE room_id = ?`, roomID)
+	rows, err := h.DB.Query(`SELECT attachments_json, quote_json FROM messages WHERE room_id = ?`, roomID)
 	if err == nil {
 		for rows.Next() {
-			var raw string
-			if err := rows.Scan(&raw); err != nil {
+			var attachmentsRaw string
+			var quoteRaw sql.NullString
+			if err := rows.Scan(&attachmentsRaw, &quoteRaw); err != nil {
 				continue
 			}
-			for _, assetID := range stickerAssetIDsFromAttachments(decodeJSONArray(raw)) {
+			for _, assetID := range stickerAssetIDsFromMessagePayload(attachmentsRaw, quoteRaw) {
 				appendAssetID(assetID)
 			}
 		}

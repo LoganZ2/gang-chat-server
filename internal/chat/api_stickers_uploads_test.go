@@ -28,6 +28,19 @@ func TestAttachmentDispositionUsesUTF8FilenameStar(t *testing.T) {
 	}
 }
 
+func TestStickerAssetReferenceIncludesQuotedPreview(t *testing.T) {
+	ids := stickerAssetIDsFromMessagePayload(
+		"[]",
+		sql.NullString{
+			Valid:  true,
+			String: `[{"message_id":"source_1","sender_display_name":"Room User","body":"[表情] wave","created_at":"2026-07-14T08:12:00Z","preview_attachment":{"type":"sticker","name":"wave","asset":{"id":"asset_quote_sticker","url":"/assets/asset_quote_sticker/wave.webp","mime_type":"image/webp"}}}]`,
+		},
+	)
+	if len(ids) != 1 || ids[0] != "asset_quote_sticker" {
+		t.Fatalf("quoted sticker preview should retain its asset: %v", ids)
+	}
+}
+
 func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("sticker_owner")

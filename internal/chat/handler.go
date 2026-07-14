@@ -174,24 +174,37 @@ type roomDetail struct {
 }
 
 type message struct {
-	ID              string       `json:"id"`
-	RoomID          string       `json:"room_id"`
-	Sender          userSummary  `json:"sender"`
-	ClientMessageID string       `json:"client_message_id"`
-	Type            string       `json:"type"`
-	Body            string       `json:"body"`
-	Mentions        []any        `json:"mentions"`
-	Attachments     []any        `json:"attachments"`
-	IsRecalled      bool         `json:"is_recalled"`
-	RecalledAt      *string      `json:"recalled_at"`
-	RecalledBy      *userSummary `json:"recalled_by"`
-	IsForceDeleted  bool         `json:"is_force_deleted"`
-	ForceDeletedAt  *string      `json:"force_deleted_at"`
-	ForceDeletedBy  *userSummary `json:"force_deleted_by"`
-	CreatedAt       string       `json:"created_at"`
+	ID              string         `json:"id"`
+	RoomID          string         `json:"room_id"`
+	Sender          userSummary    `json:"sender"`
+	ClientMessageID string         `json:"client_message_id"`
+	Type            string         `json:"type"`
+	Body            string         `json:"body"`
+	Mentions        []any          `json:"mentions"`
+	Attachments     []any          `json:"attachments"`
+	Quote           *messageQuote  `json:"quote,omitempty"`
+	Quotes          []messageQuote `json:"quotes,omitempty"`
+	IsRecalled      bool           `json:"is_recalled"`
+	RecalledAt      *string        `json:"recalled_at"`
+	RecalledBy      *userSummary   `json:"recalled_by"`
+	IsForceDeleted  bool           `json:"is_force_deleted"`
+	ForceDeletedAt  *string        `json:"force_deleted_at"`
+	ForceDeletedBy  *userSummary   `json:"force_deleted_by"`
+	CreatedAt       string         `json:"created_at"`
 
 	recalledByUserID     string `json:"-"`
 	forceDeletedByUserID string `json:"-"`
+}
+
+// messageQuote is an immutable send-time snapshot. MessageID remains useful
+// for navigation, while the display fields deliberately survive later edits,
+// recalls, deletions, membership changes, and account deletion.
+type messageQuote struct {
+	MessageID         string `json:"message_id"`
+	SenderDisplayName string `json:"sender_display_name"`
+	Body              string `json:"body"`
+	CreatedAt         string `json:"created_at"`
+	PreviewAttachment any    `json:"preview_attachment,omitempty"`
 }
 
 type liveParticipant struct {
@@ -236,11 +249,13 @@ type createRoomRequest struct {
 }
 
 type sendMessageRequest struct {
-	ClientMessageID string `json:"client_message_id"`
-	Type            string `json:"type"`
-	Body            string `json:"body"`
-	Mentions        []any  `json:"mentions"`
-	Attachments     []any  `json:"attachments"`
+	ClientMessageID string   `json:"client_message_id"`
+	Type            string   `json:"type"`
+	Body            string   `json:"body"`
+	Mentions        []any    `json:"mentions"`
+	Attachments     []any    `json:"attachments"`
+	QuoteMessageID  string   `json:"quote_message_id"`
+	QuoteMessageIDs []string `json:"quote_message_ids"`
 }
 
 type markReadRequest struct {
@@ -581,13 +596,14 @@ func scanMessage(rows *sql.Rows) (message, error) {
 	var senderDisplayName, senderAvatarURL, senderDefaultAvatar sql.NullString
 	var senderRoomDisplayName, senderRoomRole sql.NullString
 	var mentionsJSON, attachmentsJSON string
+	var quoteJSON sql.NullString
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
 	var isRecalled, isForceDeleted, senderIsSuperuser, senderIsDeleted int
 	var createdAt int64
 	if err := rows.Scan(
 		&msg.ID, &msg.RoomID, &msg.ClientMessageID, &msg.Type, &msg.Body,
-		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
+		&mentionsJSON, &attachmentsJSON, &quoteJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
 		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole, &senderIsDeleted,
@@ -603,6 +619,10 @@ func scanMessage(rows *sql.Rows) (message, error) {
 	}
 	msg.Mentions = decodeJSONArray(mentionsJSON)
 	msg.Attachments = decodeJSONArray(attachmentsJSON)
+	msg.Quotes = decodeMessageQuotes(quoteJSON)
+	if len(msg.Quotes) > 0 {
+		msg.Quote = &msg.Quotes[0]
+	}
 	msg.IsRecalled = isRecalled != 0
 	msg.IsForceDeleted = isForceDeleted != 0
 	if recalledAt.Valid {
@@ -890,4 +910,35 @@ func decodeJSONArray(raw string) []any {
 		return []any{}
 	}
 	return out
+}
+
+func decodeMessageQuote(raw sql.NullString) *messageQuote {
+	quotes := decodeMessageQuotes(raw)
+	if len(quotes) == 0 {
+		return nil
+	}
+	return &quotes[0]
+}
+
+func decodeMessageQuotes(raw sql.NullString) []messageQuote {
+	if !raw.Valid || raw.String == "" {
+		return nil
+	}
+	var quotes []messageQuote
+	if err := json.Unmarshal([]byte(raw.String), &quotes); err == nil {
+		filtered := quotes[:0]
+		for _, quote := range quotes {
+			if quote.MessageID != "" {
+				filtered = append(filtered, quote)
+			}
+		}
+		if len(filtered) > 0 {
+			return filtered
+		}
+	}
+	var quote messageQuote
+	if err := json.Unmarshal([]byte(raw.String), &quote); err != nil || quote.MessageID == "" {
+		return nil
+	}
+	return []messageQuote{quote}
 }

@@ -150,6 +150,7 @@ CREATE TABLE `messages` (
   `body` text NOT NULL,
   `mentions_json` json NOT NULL,
   `attachments_json` json NOT NULL,
+  `quote_json` json DEFAULT NULL,
   `is_recalled` tinyint(1) NOT NULL DEFAULT '0',
   `recalled_at` bigint DEFAULT NULL,
   `recalled_by_user_id` varchar(128) DEFAULT NULL,
