@@ -228,7 +228,8 @@ func TestMessageQuoteUsesImmutableSingleLevelSnapshot(t *testing.T) {
 		"body":              "不应发送",
 		"quote_message_id":  firstReply["id"],
 	})
-	if status != http.StatusBadRequest || response["code"] != "validation_failed" {
+	errorBody, _ := response["error"].(map[string]any)
+	if status != http.StatusBadRequest || errorBody["code"] != "validation_failed" {
 		t.Fatalf("recalled source should not be quotable: status=%d response=%v", status, response)
 	}
 }

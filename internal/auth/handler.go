@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/apierrors"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
@@ -504,7 +505,7 @@ func isDuplicateEntryError(err error) bool {
 
 func errorJSON(c *gin.Context, status int, code, message string) {
 	c.AbortWithStatusJSON(status, ErrorResponse{
-		Error: ErrorBody{Code: code, Message: message, RequestID: c.GetString("request_id")},
+		Error: ErrorBody{Code: code, Message: apierrors.UserMessage(code, message, status), RequestID: c.GetString("request_id")},
 	})
 }
 

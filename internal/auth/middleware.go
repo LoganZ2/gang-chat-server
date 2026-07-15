@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/apierrors"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 )
 
@@ -18,7 +19,7 @@ func (m *AuthMiddleware) Handle(c *gin.Context) {
 	header := c.GetHeader("Authorization")
 	if header == "" || !strings.HasPrefix(header, "Bearer ") {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{
-			Error: ErrorBody{Code: "unauthorized", Message: "missing authorization header", RequestID: c.GetString("request_id")},
+			Error: ErrorBody{Code: "unauthorized", Message: apierrors.UserMessage("unauthorized", "missing authorization header", http.StatusUnauthorized), RequestID: c.GetString("request_id")},
 		})
 		return
 	}
@@ -27,7 +28,7 @@ func (m *AuthMiddleware) Handle(c *gin.Context) {
 	claims, err := VerifyAccessToken(tokenStr, m.JWTSecret)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{
-			Error: ErrorBody{Code: "unauthorized", Message: "invalid token", RequestID: c.GetString("request_id")},
+			Error: ErrorBody{Code: "unauthorized", Message: apierrors.UserMessage("unauthorized", "invalid token", http.StatusUnauthorized), RequestID: c.GetString("request_id")},
 		})
 		return
 	}
@@ -42,7 +43,7 @@ func (m *AuthMiddleware) Handle(c *gin.Context) {
 	).Scan(&revokedAt, &status)
 	if err != nil || revokedAt != "" || status != "active" {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{
-			Error: ErrorBody{Code: "unauthorized", Message: "session invalid", RequestID: c.GetString("request_id")},
+			Error: ErrorBody{Code: "unauthorized", Message: apierrors.UserMessage("unauthorized", "session invalid", http.StatusUnauthorized), RequestID: c.GetString("request_id")},
 		})
 		return
 	}
@@ -66,7 +67,7 @@ func getUserFromContext(c *gin.Context, db *sql.DB) (*model.User, bool) {
 	u, err := model.GetUserByID(db, userID)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{
-			Error: ErrorBody{Code: "unauthorized", Message: "user not found", RequestID: c.GetString("request_id")},
+			Error: ErrorBody{Code: "unauthorized", Message: apierrors.UserMessage("unauthorized", "user not found", http.StatusUnauthorized), RequestID: c.GetString("request_id")},
 		})
 		return nil, false
 	}

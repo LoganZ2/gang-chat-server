@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/apierrors"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
 )
 
@@ -475,7 +476,7 @@ func (h *Handler) userProfileRooms(targetID, viewerID string, allRooms bool) ([]
 
 func (h *Handler) jsonError(c *gin.Context, status int, code, message string) {
 	c.AbortWithStatusJSON(status, errorResponse{
-		Error: errorBody{Code: code, Message: message, RequestID: c.GetString("request_id")},
+		Error: errorBody{Code: code, Message: apierrors.UserMessage(code, message, status), RequestID: c.GetString("request_id")},
 	})
 }
 

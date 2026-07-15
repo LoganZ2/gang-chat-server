@@ -44,7 +44,8 @@ func (h *Handler) receive(c *gin.Context) {
 	provider := auth.NewSimpleKeyProvider(h.Cfg.LiveKitAPIKey, h.Cfg.LiveKitAPISecret)
 	ev, err := webhook.ReceiveWebhookEvent(c.Request, provider)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		log.Printf("livekit webhook: verification failed: %v", err)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "回调验证失败"})
 		return
 	}
 
