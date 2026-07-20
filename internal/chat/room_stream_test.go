@@ -290,16 +290,27 @@ func TestStreamJoinPolicyChangeRefreshesPendingInvites(t *testing.T) {
 func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("owner_msg")
+	member := api.register("member_msg")
 	roomCard := api.createRoom(owner.Token, map[string]any{"name": "Chatty", "join_policy": "open"})
 	roomID := roomCard["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
 
 	ownerStream := api.connectStream(owner.User["id"].(string))
+	memberStream := api.connectStream(member.User["id"].(string))
 	_ = api.sendMessage(owner.Token, roomID, "hello world")
 
 	updated := ownerStream.await("room_updated")
 	snap := updated["snapshot"].(roomSnapshot)
 	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "hello world" {
 		t.Fatalf("room_updated should carry the new last_message: %+v", snap.LastMessage)
+	}
+	if snap.UpdateReason != "" {
+		t.Fatalf("sender snapshot must not request a message notification: %+v", snap)
+	}
+	recipientSnap := memberStream.await("room_updated")["snapshot"].(roomSnapshot)
+	if recipientSnap.UpdateReason != roomUpdateReasonMessageCreated {
+		t.Fatalf("recipient snapshot should identify a realtime message: %+v", recipientSnap)
 	}
 
 	api.sendTypedMessage(owner.Token, roomID, "audio", "voice_1.m4a", []any{
@@ -317,6 +328,10 @@ func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 	})
 	updated = ownerStream.await("room_updated")
 	snap = updated["snapshot"].(roomSnapshot)
+	recipientSnap = memberStream.await("room_updated")["snapshot"].(roomSnapshot)
+	if recipientSnap.UpdateReason != roomUpdateReasonMessageCreated {
+		t.Fatalf("typed messages should request the same realtime notification: %+v", recipientSnap)
+	}
 	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != `[语音] 15"` {
 		t.Fatalf("room_updated should label voice last_message: %+v", snap.LastMessage)
 	}

@@ -7,6 +7,8 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 )
 
+const roomUpdateReasonMessageCreated = "message_created"
+
 // Room-list realtime sync. Membership and room metadata are low-frequency
 // relative to live audio, so rather than diffing we rebuild a full snapshot
 // on every change and let clients blindly overwrite their list entry. Three
@@ -57,6 +59,7 @@ type roomSnapshot struct {
 	HasPendingJoinRequests      bool                `json:"has_pending_join_requests"`
 	CreatedAt                   string              `json:"created_at"`
 	UpdatedAt                   string              `json:"updated_at"`
+	UpdateReason                string              `json:"update_reason,omitempty"`
 }
 
 // buildRoomSnapshot rebuilds the full public snapshot for roomID from the DB.
@@ -195,14 +198,24 @@ func (h *Handler) applyRoomSnapshotPersonalFields(snapshot *roomSnapshot, roomID
 // every current member of roomID, skipping any userID in exclude (used when a
 // member who just got their own room_added shouldn't also get room_updated).
 func (h *Handler) publishRoomUpdated(roomID string, exclude ...string) {
-	h.publishRoomUpdatedWithOptions(roomID, false, exclude...)
+	h.publishRoomUpdatedWithOptions(roomID, false, "", exclude...)
 }
 
 func (h *Handler) publishRoomMessageUpdated(roomID string, exclude ...string) {
-	h.publishRoomUpdatedWithOptions(roomID, true, exclude...)
+	h.publishRoomUpdatedWithOptions(
+		roomID,
+		true,
+		roomUpdateReasonMessageCreated,
+		exclude...,
+	)
 }
 
-func (h *Handler) publishRoomUpdatedWithOptions(roomID string, skipBlockedMessages bool, exclude ...string) {
+func (h *Handler) publishRoomUpdatedWithOptions(
+	roomID string,
+	skipBlockedMessages bool,
+	updateReason string,
+	exclude ...string,
+) {
 	if h == nil || h.Bus == nil || roomID == "" {
 		return
 	}
@@ -229,6 +242,7 @@ func (h *Handler) publishRoomUpdatedWithOptions(roomID string, skipBlockedMessag
 			continue
 		}
 		userSnapshot := snapshot
+		userSnapshot.UpdateReason = updateReason
 		h.applyRoomSnapshotPersonalFields(&userSnapshot, roomID, userID)
 		ev := eventbus.Event{
 			Type:   "room_updated",
